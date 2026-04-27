@@ -4,7 +4,8 @@ from typing import Any
 
 from буревестник.настройки import (
     DETECTION_CONFIDENCE,
-    YOLO_LABELS_RU,
+    DETECTION_IOU,
+    DETECTION_MAX_RESULTS,
     YOLO_MODEL_NAME,
 )
 from буревестник.сущности import Detection
@@ -24,6 +25,8 @@ def detect_objects(frame, model: Any) -> list[Detection]:
     result = model.predict(
         source=frame,
         conf=DETECTION_CONFIDENCE,
+        iou=DETECTION_IOU,
+        max_det=DETECTION_MAX_RESULTS,
         verbose=False,
     )[0]
 
@@ -41,19 +44,13 @@ def detect_objects(frame, model: Any) -> list[Detection]:
 
         class_id = int(box.cls[0])
         raw_label = str(names.get(class_id, f"class_{class_id}"))
-        label = translate_label(raw_label)
         x1, y1, x2, y2 = [int(value) for value in box.xyxy[0]]
         detections.append(
             Detection(
                 bbox=(x1, y1, x2, y2),
-                label=label,
+                label=raw_label,
                 confidence=confidence,
             )
         )
 
     return detections
-
-
-def translate_label(label: str) -> str:
-    return YOLO_LABELS_RU.get(label, label)
-

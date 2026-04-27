@@ -5,9 +5,13 @@ from __future__ import annotations
 # даже на обычной веб-камере: человек, бутылка или стул тоже получат ID.
 # Для финала сузим список до воздушных объектов и обученной модели дронов.
 MAX_TRACKED_OBJECTS = 5
-DETECTION_CONFIDENCE = 0.35
-TRACK_MAX_DISTANCE = 95.0
-TRACK_MAX_LOST_FRAMES = 12
+DETECTION_CONFIDENCE = 0.50
+DETECTION_IOU = 0.45
+DETECTION_MAX_RESULTS = 8
+TRACK_MAX_DISTANCE = 70.0
+TRACK_MAX_LOST_FRAMES = 8
+TRACK_MIN_HITS = 2
+TRACK_MIN_IOU = 0.08
 
 YOLO_MODEL_NAME = "yolov8n.pt"
 
@@ -39,4 +43,3 @@ TRACK_COLORS = [
     (220, 100, 255),
     (255, 220, 80),
 ]
-

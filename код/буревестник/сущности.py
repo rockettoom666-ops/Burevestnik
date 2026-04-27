@@ -45,6 +45,12 @@ class Track:
     label: str
     confidence: float
     center: tuple[int, int]
+    hits: int = 1
     lost_frames: int = 0
     trace: deque[tuple[int, int]] = field(default_factory=lambda: deque(maxlen=30))
 
+    @property
+    def confirmed(self) -> bool:
+        from буревестник.настройки import TRACK_MIN_HITS
+
+        return self.hits >= TRACK_MIN_HITS
