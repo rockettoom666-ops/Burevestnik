@@ -18,6 +18,7 @@ from буревестник.настройки import (
     SUSPICIOUS_DOT_DEFAULT_LABEL,
     SUSPICIOUS_DOT_IGNORE_RADIUS,
     TRACK_MAX_LOST_FRAMES,
+    YOLO_LABELS_RU,
 )
 from буревестник.отрисовка import (
     draw_suspicious_point,
@@ -26,6 +27,7 @@ from буревестник.отрисовка import (
 )
 from буревестник.подозрительные_точки import (
     ConfirmedSuspiciousTarget,
+    SuspiciousMotionTracker,
     SuspiciousPoint,
     find_suspicious_points,
     make_detection,
@@ -87,6 +89,7 @@ class BurevestnikPrototype(ctk.CTk):
         self.detector_model: Any | None = None
         self.detector_loading = False
         self.tracker = SimpleTracker()
+        self.suspicious_motion_tracker = SuspiciousMotionTracker()
         self.pending_suspicious_point: SuspiciousPoint | None = None
         self.ignored_suspicious_centers: list[tuple[int, int]] = []
         self.confirmed_suspicious_targets: list[ConfirmedSuspiciousTarget] = []
@@ -256,26 +259,7 @@ class BurevestnikPrototype(ctk.CTk):
         self.suspicious_no_button.grid(row=3, column=1, padx=(6, 12), pady=(0, 12), sticky="ew")
         self._set_suspicious_buttons_enabled(False)
 
-        objects_title = ctk.CTkLabel(
-            self.sidebar,
-            text="Объекты на кадре",
-            font=ctk.CTkFont(size=16, weight="bold"),
-            text_color="#e5e7eb",
-        )
-        objects_title.grid(row=9, column=0, padx=24, pady=(0, 8), sticky="w")
-
-        self.objects_table = ctk.CTkTextbox(
-            self.sidebar,
-            fg_color="#0f172a",
-            corner_radius=12,
-            height=145,
-            font=("Consolas", 12),
-            wrap="none",
-            text_color="#d1d5db",
-        )
-        self.objects_table.grid(row=10, column=0, padx=24, pady=(0, 14), sticky="nsew")
-        self.sidebar.grid_rowconfigure(10, weight=1)
-        self._update_objects_table([])
+        self.sidebar.grid_rowconfigure(9, weight=1)
 
         self.status_label = ctk.CTkLabel(
             self.sidebar,
@@ -284,7 +268,7 @@ class BurevestnikPrototype(ctk.CTk):
             wraplength=270,
             text_color="#9ca3af",
         )
-        self.status_label.grid(row=11, column=0, padx=24, pady=(0, 22), sticky="ew")
+        self.status_label.grid(row=10, column=0, padx=24, pady=(0, 22), sticky="ew")
 
         self.header = ctk.CTkFrame(self.main, height=104, fg_color="#0b1018", corner_radius=0)
         self.header.grid(row=0, column=0, sticky="ew", padx=26, pady=(22, 8))
@@ -313,8 +297,13 @@ class BurevestnikPrototype(ctk.CTk):
         )
         self.video_label.grid(row=0, column=0, sticky="nsew", padx=18, pady=18)
 
+        self.objects_panel = ctk.CTkFrame(self.main, fg_color="#0b1018", corner_radius=0)
+        self.objects_panel.grid(row=2, column=0, sticky="ew", padx=26, pady=(0, 10))
+        self.objects_panel.grid_columnconfigure(0, weight=1)
+        self._build_objects_table(self.objects_panel)
+
         self.footer = ctk.CTkFrame(self.main, height=58, fg_color="#0b1018", corner_radius=0)
-        self.footer.grid(row=2, column=0, sticky="ew", padx=26, pady=(0, 20))
+        self.footer.grid(row=3, column=0, sticky="ew", padx=26, pady=(0, 20))
         self.footer.grid_columnconfigure(0, weight=1)
 
         self.future_label = ctk.CTkLabel(
@@ -324,6 +313,84 @@ class BurevestnikPrototype(ctk.CTk):
             anchor="w",
         )
         self.future_label.grid(row=0, column=0, sticky="ew")
+
+    def _build_objects_table(self, parent: ctk.CTkFrame) -> None:
+        """Собирает видимую таблицу объектов под видеопотоком."""
+
+        objects_title_row = ctk.CTkFrame(parent, fg_color="transparent")
+        objects_title_row.grid(row=0, column=0, pady=(0, 7), sticky="ew")
+        objects_title_row.grid_columnconfigure(0, weight=1)
+
+        objects_title = ctk.CTkLabel(
+            objects_title_row,
+            text="Объекты на кадре",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color="#e5e7eb",
+            anchor="w",
+        )
+        objects_title.grid(row=0, column=0, sticky="ew")
+
+        self.objects_count_label = ctk.CTkLabel(
+            objects_title_row,
+            text="0 сейчас",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#38bdf8",
+            anchor="e",
+        )
+        self.objects_count_label.grid(row=0, column=1, sticky="e")
+
+        self.objects_table = ctk.CTkFrame(
+            parent,
+            fg_color="#0f172a",
+            corner_radius=12,
+            height=146,
+        )
+        self.objects_table.grid(row=1, column=0, sticky="ew")
+        self.objects_table.grid_propagate(False)
+
+        for column, width in enumerate((58, 220, 86, 86, 104)):
+            self.objects_table.grid_columnconfigure(column, minsize=width, weight=1 if column == 1 else 0)
+
+        # Это настоящая таблица: отдельные колонки проще читать, чем строку
+        # текста, особенно когда X/Y быстро меняются на живом видео.
+        for column, title_text in enumerate(("ID", "Тип", "X", "Y", "Увер.")):
+            header_label = ctk.CTkLabel(
+                self.objects_table,
+                text=title_text,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                text_color="#94a3b8",
+                anchor="w" if column == 1 else "center",
+            )
+            header_label.grid(row=0, column=column, padx=(12 if column == 0 else 4, 4), pady=(10, 3), sticky="ew")
+
+        separator = ctk.CTkFrame(self.objects_table, fg_color="#1e293b", height=1)
+        separator.grid(row=1, column=0, columnspan=5, padx=12, pady=(0, 4), sticky="ew")
+
+        self.empty_objects_label = ctk.CTkLabel(
+            self.objects_table,
+            text="Пока объектов нет. Включи отслеживание, и здесь появятся ID, тип и координаты.",
+            text_color="#64748b",
+            font=ctk.CTkFont(size=13),
+        )
+        self.empty_objects_label.grid(row=2, column=0, columnspan=5, padx=12, pady=(28, 0), sticky="ew")
+
+        self.object_row_labels: list[list[ctk.CTkLabel]] = []
+        for row in range(MAX_TRACKED_OBJECTS):
+            labels: list[ctk.CTkLabel] = []
+            for column in range(5):
+                label = ctk.CTkLabel(
+                    self.objects_table,
+                    text="",
+                    height=20,
+                    font=("Consolas", 12),
+                    text_color="#e5e7eb",
+                    anchor="w" if column == 1 else "center",
+                )
+                label.grid(row=row + 2, column=column, padx=(12 if column == 0 else 4, 4), pady=1, sticky="ew")
+                labels.append(label)
+            self.object_row_labels.append(labels)
+
+        self._update_objects_table([])
 
     def _make_info_block(
         self,
@@ -361,6 +428,7 @@ class BurevestnikPrototype(ctk.CTk):
 
         self.tracking_enabled = bool(self.tracking_switch.get())
         self.tracker.reset()
+        self.suspicious_motion_tracker.reset()
         self.pending_suspicious_point = None
         self._update_objects_table([])
 
@@ -689,8 +757,9 @@ class BurevestnikPrototype(ctk.CTk):
             self.future_label.configure(text="Отслеживание выключено из-за ошибки модели.")
             return frame
 
-        suspicious_points = find_suspicious_points(frame, detections)
-        detections.extend(self._handle_suspicious_points(suspicious_points))
+        raw_suspicious_points = find_suspicious_points(frame, detections)
+        moving_suspicious_points = self.suspicious_motion_tracker.update(raw_suspicious_points)
+        detections.extend(self._handle_suspicious_points(moving_suspicious_points, raw_suspicious_points))
 
         tracks = self.tracker.update(detections)
         draw_tracking_overlay(frame, tracks)
@@ -699,12 +768,25 @@ class BurevestnikPrototype(ctk.CTk):
         self._update_objects_table(tracks)
         return frame
 
-    def _handle_suspicious_points(self, points: list[SuspiciousPoint]):
+    def _handle_suspicious_points(
+        self,
+        moving_points: list[SuspiciousPoint],
+        raw_points: list[SuspiciousPoint],
+    ):
         """Связывает найденные темные точки с решениями оператора."""
 
-        usable_points = [
+        usable_raw_points = [
             point
-            for point in points
+            for point in raw_points
+            if not point_near_any(
+                point.center,
+                self.ignored_suspicious_centers,
+                SUSPICIOUS_DOT_IGNORE_RADIUS,
+            )
+        ]
+        usable_moving_points = [
+            point
+            for point in moving_points
             if not point_near_any(
                 point.center,
                 self.ignored_suspicious_centers,
@@ -718,7 +800,7 @@ class BurevestnikPrototype(ctk.CTk):
         for target in list(self.confirmed_suspicious_targets):
             point = nearest_point(
                 target.center,
-                usable_points,
+                usable_raw_points,
                 SUSPICIOUS_DOT_CONFIRM_RADIUS,
             )
 
@@ -733,16 +815,25 @@ class BurevestnikPrototype(ctk.CTk):
             used_centers.append(point.center)
             manual_detections.append(make_detection(point, target.label))
 
-        usable_points = [
+        usable_moving_points = [
             point
-            for point in usable_points
+            for point in usable_moving_points
+            if not point_near_any(point.center, used_centers, SUSPICIOUS_DOT_CONFIRM_RADIUS)
+        ]
+        usable_raw_points = [
+            point
+            for point in usable_raw_points
             if not point_near_any(point.center, used_centers, SUSPICIOUS_DOT_CONFIRM_RADIUS)
         ]
 
         if self.pending_suspicious_point is not None:
             refreshed = nearest_point(
                 self.pending_suspicious_point.center,
-                usable_points,
+                usable_moving_points,
+                SUSPICIOUS_DOT_CONFIRM_RADIUS,
+            ) or nearest_point(
+                self.pending_suspicious_point.center,
+                usable_raw_points,
                 SUSPICIOUS_DOT_CONFIRM_RADIUS,
             )
             if refreshed is None:
@@ -754,12 +845,12 @@ class BurevestnikPrototype(ctk.CTk):
                     f"Возможная дальняя цель: {refreshed.center[0]}, {refreshed.center[1]}",
                     active=True,
                 )
-        elif usable_points:
-            self.pending_suspicious_point = usable_points[0]
+        elif usable_moving_points:
+            self.pending_suspicious_point = usable_moving_points[0]
             self.suspicious_entry.delete(0, "end")
             self.suspicious_entry.insert(0, SUSPICIOUS_DOT_DEFAULT_LABEL)
             self._show_suspicious_message(
-                f"Возможная дальняя цель: {usable_points[0].center[0]}, {usable_points[0].center[1]}",
+                f"Возможная дальняя цель: {usable_moving_points[0].center[0]}, {usable_moving_points[0].center[1]}",
                 active=True,
             )
         elif not self.confirmed_suspicious_targets:
@@ -769,6 +860,7 @@ class BurevestnikPrototype(ctk.CTk):
 
     def _reset_suspicious_state(self) -> None:
         self.pending_suspicious_point = None
+        self.suspicious_motion_tracker.reset()
         self.ignored_suspicious_centers.clear()
         self.confirmed_suspicious_targets.clear()
         if hasattr(self, "suspicious_entry"):
@@ -776,30 +868,48 @@ class BurevestnikPrototype(ctk.CTk):
             self.suspicious_entry.insert(0, SUSPICIOUS_DOT_DEFAULT_LABEL)
 
     def _update_objects_table(self, tracks: list[Track]) -> None:
-        """Обновляет таблицу объектов в левой панели."""
+        """Обновляет живую таблицу объектов под видеопотоком."""
 
         table = getattr(self, "objects_table", None)
         if table is None:
             return
 
-        table.configure(state="normal")
-        table.delete("0.0", "end")
+        visible_tracks = tracks[:MAX_TRACKED_OBJECTS]
+        hidden_count = max(len(tracks) - len(visible_tracks), 0)
 
-        if not tracks:
-            table.insert("0.0", "Пока целей нет\n\nID появятся после включения отслеживания.")
-            table.configure(state="disabled")
-            return
+        if hidden_count:
+            self.objects_count_label.configure(text=f"{len(visible_tracks)} из {len(tracks)}")
+        else:
+            self.objects_count_label.configure(text=f"{len(visible_tracks)} сейчас")
 
-        table.insert("0.0", "ID   Тип          X     Y     Увер.\n")
-        table.insert("end", "-" * 36 + "\n")
+        if visible_tracks:
+            self.empty_objects_label.grid_remove()
+        else:
+            self.empty_objects_label.grid()
 
-        for track in tracks[:MAX_TRACKED_OBJECTS]:
+        for row, labels in enumerate(self.object_row_labels):
+            if row >= len(visible_tracks):
+                for label in labels:
+                    label.grid_remove()
+                    label.configure(text="", fg_color="transparent")
+                continue
+
+            track = visible_tracks[row]
             cx, cy = track.center
-            confidence = int(track.confidence * 100)
-            line = f"{track.track_id:<4} {track.label[:10]:<11} {cx:<5} {cy:<5} {confidence:>3}%\n"
-            table.insert("end", line)
+            label_ru = YOLO_LABELS_RU.get(track.label, track.label)
+            confidence = f"{int(track.confidence * 100)}%"
+            row_color = "#111c2e" if row % 2 == 0 else "#0f172a"
+            values = (
+                str(track.track_id),
+                label_ru[:12],
+                str(cx),
+                str(cy),
+                confidence,
+            )
 
-        table.configure(state="disabled")
+            for label, value in zip(labels, values):
+                label.grid()
+                label.configure(text=value, fg_color=row_color)
 
     def _draw_frame(self, frame) -> None:
         """Преобразует кадр OpenCV в картинку, которую умеет показывать Tkinter."""

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
 from math import hypot
 
 import cv2
@@ -9,8 +10,16 @@ from буревестник.настройки import (
     SUSPICIOUS_DOT_DARK_THRESHOLD,
     SUSPICIOUS_DOT_MAX_AREA,
     SUSPICIOUS_DOT_MAX_HEIGHT,
+    SUSPICIOUS_DOT_MAX_MISSED_FRAMES,
     SUSPICIOUS_DOT_MAX_WIDTH,
+    SUSPICIOUS_DOT_MATCH_RADIUS,
     SUSPICIOUS_DOT_MIN_AREA,
+    SUSPICIOUS_DOT_MIN_FRAMES,
+    SUSPICIOUS_DOT_MIN_HEIGHT,
+    SUSPICIOUS_DOT_MIN_MOVE,
+    SUSPICIOUS_DOT_MIN_PATH,
+    SUSPICIOUS_DOT_MIN_WIDTH,
+    SUSPICIOUS_DOT_TRAJECTORY_LENGTH,
 )
 from буревестник.сущности import Detection
 
@@ -23,6 +32,7 @@ class SuspiciousPoint:
     center: tuple[int, int]
     area: float
     darkness: int
+    trajectory: tuple[tuple[int, int], ...] = ()
 
     @property
     def score(self) -> float:
@@ -37,6 +47,138 @@ class ConfirmedSuspiciousTarget:
     label: str
     center: tuple[int, int]
     missed_frames: int = 0
+
+
+@dataclass
+class SuspiciousMotionCandidate:
+    """Кандидат на дальнюю цель, который проверяется по движению."""
+
+    candidate_id: int
+    point: SuspiciousPoint
+    centers: deque[tuple[int, int]] = field(
+        default_factory=lambda: deque(maxlen=SUSPICIOUS_DOT_TRAJECTORY_LENGTH)
+    )
+    hits: int = 1
+    missed_frames: int = 0
+
+    def __post_init__(self) -> None:
+        self.centers.append(self.point.center)
+
+    def refresh(self, point: SuspiciousPoint) -> None:
+        self.point = point
+        self.centers.append(point.center)
+        self.hits += 1
+        self.missed_frames = 0
+
+    @property
+    def movement(self) -> float:
+        if len(self.centers) < 2:
+            return 0.0
+
+        first = self.centers[0]
+        last = self.centers[-1]
+        return hypot(first[0] - last[0], first[1] - last[1])
+
+    @property
+    def path_length(self) -> float:
+        if len(self.centers) < 2:
+            return 0.0
+
+        points = list(self.centers)
+        return sum(
+            hypot(points[index][0] - points[index - 1][0], points[index][1] - points[index - 1][1])
+            for index in range(1, len(points))
+        )
+
+    @property
+    def ready_for_operator(self) -> bool:
+        return (
+            self.hits >= SUSPICIOUS_DOT_MIN_FRAMES
+            and self.movement >= SUSPICIOUS_DOT_MIN_MOVE
+            and self.path_length >= SUSPICIOUS_DOT_MIN_PATH
+        )
+
+    def as_point(self) -> SuspiciousPoint:
+        return SuspiciousPoint(
+            bbox=self.point.bbox,
+            center=self.point.center,
+            area=self.point.area,
+            darkness=self.point.darkness,
+            trajectory=tuple(self.centers),
+        )
+
+
+class SuspiciousMotionTracker:
+    """Отсекает одиночные точки и оставляет только движущиеся кандидаты."""
+
+    def __init__(self) -> None:
+        self.next_id = 1
+        self.candidates: dict[int, SuspiciousMotionCandidate] = {}
+
+    def reset(self) -> None:
+        self.next_id = 1
+        self.candidates.clear()
+
+    def update(self, points: list[SuspiciousPoint]) -> list[SuspiciousPoint]:
+        used_candidates: set[int] = set()
+
+        for point in sorted(points, key=lambda item: item.score, reverse=True):
+            candidate_id = self._nearest_candidate(point.center, used_candidates)
+            if candidate_id is None:
+                self._register(point, used_candidates)
+            else:
+                self.candidates[candidate_id].refresh(point)
+                used_candidates.add(candidate_id)
+
+        for candidate_id in list(self.candidates):
+            if candidate_id in used_candidates:
+                continue
+
+            candidate = self.candidates[candidate_id]
+            candidate.missed_frames += 1
+            if candidate.missed_frames > SUSPICIOUS_DOT_MAX_MISSED_FRAMES:
+                del self.candidates[candidate_id]
+
+        ready_points = [
+            candidate.as_point()
+            for candidate in self.candidates.values()
+            if candidate.ready_for_operator
+        ]
+        return sorted(ready_points, key=lambda item: item.score, reverse=True)
+
+    def _nearest_candidate(
+        self,
+        center: tuple[int, int],
+        used_candidates: set[int],
+    ) -> int | None:
+        best_id: int | None = None
+        best_distance = SUSPICIOUS_DOT_MATCH_RADIUS
+
+        for candidate_id, candidate in self.candidates.items():
+            if candidate_id in used_candidates:
+                continue
+
+            distance = hypot(
+                center[0] - candidate.point.center[0],
+                center[1] - candidate.point.center[1],
+            )
+            if distance <= best_distance:
+                best_id = candidate_id
+                best_distance = distance
+
+        return best_id
+
+    def _register(
+        self,
+        point: SuspiciousPoint,
+        used_candidates: set[int],
+    ) -> None:
+        self.candidates[self.next_id] = SuspiciousMotionCandidate(
+            candidate_id=self.next_id,
+            point=point,
+        )
+        used_candidates.add(self.next_id)
+        self.next_id += 1
 
 
 def find_suspicious_points(
@@ -71,6 +213,9 @@ def find_suspicious_points(
             continue
 
         x, y, w, h = cv2.boundingRect(contour)
+        if w < SUSPICIOUS_DOT_MIN_WIDTH or h < SUSPICIOUS_DOT_MIN_HEIGHT:
+            continue
+
         if w > SUSPICIOUS_DOT_MAX_WIDTH or h > SUSPICIOUS_DOT_MAX_HEIGHT:
             continue
 

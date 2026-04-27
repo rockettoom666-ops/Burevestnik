@@ -73,6 +73,12 @@ def draw_suspicious_point(frame, point: SuspiciousPoint) -> None:
 
     cv2.rectangle(frame, (x1 - 8, y1 - 8), (x2 + 8, y2 + 8), color, 2)
     cv2.circle(frame, (cx, cy), 12, color, 2)
+
+    if len(point.trajectory) > 1:
+        points = list(point.trajectory)
+        for index in range(1, len(points)):
+            cv2.line(frame, points[index - 1], points[index], color, 2, cv2.LINE_AA)
+
     cv2.putText(
         frame,
         "possible drone?",
