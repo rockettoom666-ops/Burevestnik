@@ -15,6 +15,18 @@ TRACK_MIN_IOU = 0.08
 
 YOLO_MODEL_NAME = "yolov8n.pt"
 
+# Настройки поиска дальних темных точек. Это не "готовая детекция дрона",
+# а аккуратный сигнал оператору: "здесь есть маленький темный объект,
+# который YOLO может не распознать".
+SUSPICIOUS_DOT_DARK_THRESHOLD = 70
+SUSPICIOUS_DOT_MIN_AREA = 3
+SUSPICIOUS_DOT_MAX_AREA = 130
+SUSPICIOUS_DOT_MAX_WIDTH = 26
+SUSPICIOUS_DOT_MAX_HEIGHT = 26
+SUSPICIOUS_DOT_IGNORE_RADIUS = 48
+SUSPICIOUS_DOT_CONFIRM_RADIUS = 70
+SUSPICIOUS_DOT_DEFAULT_LABEL = "drone?"
+
 YOLO_LABELS_RU = {
     "person": "человек",
     "bicycle": "велосипед",

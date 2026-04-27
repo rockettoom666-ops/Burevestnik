@@ -12,8 +12,26 @@ import customtkinter as ctk
 from PIL import Image, ImageTk
 
 from буревестник.детекция import detect_objects, load_yolo_model
-from буревестник.настройки import MAX_TRACKED_OBJECTS
-from буревестник.отрисовка import draw_tracking_overlay, draw_waiting_label
+from буревестник.настройки import (
+    MAX_TRACKED_OBJECTS,
+    SUSPICIOUS_DOT_CONFIRM_RADIUS,
+    SUSPICIOUS_DOT_DEFAULT_LABEL,
+    SUSPICIOUS_DOT_IGNORE_RADIUS,
+    TRACK_MAX_LOST_FRAMES,
+)
+from буревестник.отрисовка import (
+    draw_suspicious_point,
+    draw_tracking_overlay,
+    draw_waiting_label,
+)
+from буревестник.подозрительные_точки import (
+    ConfirmedSuspiciousTarget,
+    SuspiciousPoint,
+    find_suspicious_points,
+    make_detection,
+    nearest_point,
+    point_near_any,
+)
 from буревестник.сущности import CameraInfo, Track
 from буревестник.трекер import SimpleTracker
 
@@ -69,6 +87,9 @@ class BurevestnikPrototype(ctk.CTk):
         self.detector_model: Any | None = None
         self.detector_loading = False
         self.tracker = SimpleTracker()
+        self.pending_suspicious_point: SuspiciousPoint | None = None
+        self.ignored_suspicious_centers: list[tuple[int, int]] = []
+        self.confirmed_suspicious_targets: list[ConfirmedSuspiciousTarget] = []
 
         # При закрытии окна важно отпустить камеру, иначе она может остаться
         # занятой процессом Python.
@@ -178,25 +199,82 @@ class BurevestnikPrototype(ctk.CTk):
         self.camera_list.grid(row=7, column=0, padx=24, pady=(0, 14), sticky="ew")
         self.camera_list.grid_columnconfigure(0, weight=1)
 
+        self.suspicious_frame = ctk.CTkFrame(
+            self.sidebar,
+            fg_color="#1b2333",
+            corner_radius=12,
+        )
+        self.suspicious_frame.grid(row=8, column=0, padx=24, pady=(0, 14), sticky="ew")
+        self.suspicious_frame.grid_columnconfigure(0, weight=1)
+        self.suspicious_frame.grid_columnconfigure(1, weight=1)
+
+        self.suspicious_title = ctk.CTkLabel(
+            self.suspicious_frame,
+            text="Подозрительная точка",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            text_color="#facc15",
+            anchor="w",
+        )
+        self.suspicious_title.grid(row=0, column=0, columnspan=2, padx=12, pady=(10, 0), sticky="ew")
+
+        self.suspicious_label = ctk.CTkLabel(
+            self.suspicious_frame,
+            text="Пока нет сигнала",
+            justify="left",
+            wraplength=250,
+            text_color="#cbd5e1",
+            anchor="w",
+        )
+        self.suspicious_label.grid(row=1, column=0, columnspan=2, padx=12, pady=(2, 8), sticky="ew")
+
+        self.suspicious_entry = ctk.CTkEntry(
+            self.suspicious_frame,
+            placeholder_text="Подпись цели",
+            height=32,
+        )
+        self.suspicious_entry.insert(0, SUSPICIOUS_DOT_DEFAULT_LABEL)
+        self.suspicious_entry.grid(row=2, column=0, columnspan=2, padx=12, pady=(0, 8), sticky="ew")
+
+        self.suspicious_yes_button = ctk.CTkButton(
+            self.suspicious_frame,
+            text="Это цель",
+            height=32,
+            fg_color="#eab308",
+            hover_color="#ca8a04",
+            command=self.confirm_suspicious_point,
+        )
+        self.suspicious_yes_button.grid(row=3, column=0, padx=(12, 6), pady=(0, 12), sticky="ew")
+
+        self.suspicious_no_button = ctk.CTkButton(
+            self.suspicious_frame,
+            text="Не цель",
+            height=32,
+            fg_color="#475569",
+            hover_color="#334155",
+            command=self.ignore_suspicious_point,
+        )
+        self.suspicious_no_button.grid(row=3, column=1, padx=(6, 12), pady=(0, 12), sticky="ew")
+        self._set_suspicious_buttons_enabled(False)
+
         objects_title = ctk.CTkLabel(
             self.sidebar,
             text="Объекты на кадре",
             font=ctk.CTkFont(size=16, weight="bold"),
             text_color="#e5e7eb",
         )
-        objects_title.grid(row=8, column=0, padx=24, pady=(0, 8), sticky="w")
+        objects_title.grid(row=9, column=0, padx=24, pady=(0, 8), sticky="w")
 
         self.objects_table = ctk.CTkTextbox(
             self.sidebar,
             fg_color="#0f172a",
             corner_radius=12,
-            height=175,
+            height=145,
             font=("Consolas", 12),
             wrap="none",
             text_color="#d1d5db",
         )
-        self.objects_table.grid(row=9, column=0, padx=24, pady=(0, 14), sticky="nsew")
-        self.sidebar.grid_rowconfigure(9, weight=1)
+        self.objects_table.grid(row=10, column=0, padx=24, pady=(0, 14), sticky="nsew")
+        self.sidebar.grid_rowconfigure(10, weight=1)
         self._update_objects_table([])
 
         self.status_label = ctk.CTkLabel(
@@ -206,7 +284,7 @@ class BurevestnikPrototype(ctk.CTk):
             wraplength=270,
             text_color="#9ca3af",
         )
-        self.status_label.grid(row=10, column=0, padx=24, pady=(0, 22), sticky="ew")
+        self.status_label.grid(row=11, column=0, padx=24, pady=(0, 22), sticky="ew")
 
         self.header = ctk.CTkFrame(self.main, height=104, fg_color="#0b1018", corner_radius=0)
         self.header.grid(row=0, column=0, sticky="ew", padx=26, pady=(22, 8))
@@ -283,6 +361,7 @@ class BurevestnikPrototype(ctk.CTk):
 
         self.tracking_enabled = bool(self.tracking_switch.get())
         self.tracker.reset()
+        self.pending_suspicious_point = None
         self._update_objects_table([])
 
         if not self.tracking_enabled:
@@ -290,6 +369,7 @@ class BurevestnikPrototype(ctk.CTk):
                 text="Отслеживание выключено. Видеопоток идет без рамок и номеров."
             )
             self.status_label.configure(text="Отслеживание выключено.")
+            self._show_suspicious_message("Пока нет сигнала", active=False)
             return
 
         self.future_label.configure(
@@ -299,6 +379,41 @@ class BurevestnikPrototype(ctk.CTk):
             self._load_detector_async()
         else:
             self.status_label.configure(text="Отслеживание включено. Модель уже загружена.")
+
+    def confirm_suspicious_point(self) -> None:
+        """Оператор подтвердил: точку теперь считаем отдельной целью."""
+
+        if self.pending_suspicious_point is None:
+            return
+
+        label = self.suspicious_entry.get().strip() or SUSPICIOUS_DOT_DEFAULT_LABEL
+        self.confirmed_suspicious_targets.append(
+            ConfirmedSuspiciousTarget(
+                label=label,
+                center=self.pending_suspicious_point.center,
+            )
+        )
+        self.pending_suspicious_point = None
+        self._show_suspicious_message(f"Цель добавлена: {label}", active=False)
+
+    def ignore_suspicious_point(self) -> None:
+        """Оператор отклонил точку: рядом с ней больше не тревожим."""
+
+        if self.pending_suspicious_point is None:
+            return
+
+        self.ignored_suspicious_centers.append(self.pending_suspicious_point.center)
+        self.pending_suspicious_point = None
+        self._show_suspicious_message("Точка добавлена в игнор", active=False)
+
+    def _show_suspicious_message(self, text: str, active: bool) -> None:
+        self.suspicious_label.configure(text=text)
+        self._set_suspicious_buttons_enabled(active)
+
+    def _set_suspicious_buttons_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        self.suspicious_yes_button.configure(state=state)
+        self.suspicious_no_button.configure(state=state)
 
     def _load_detector_async(self) -> None:
         """Загружает YOLO в отдельном потоке, чтобы окно не подвисало."""
@@ -348,6 +463,7 @@ class BurevestnikPrototype(ctk.CTk):
         )
         self._update_header(source="Источник не выбран", mode="Ожидание", fps="-", resolution="-")
         self._update_objects_table([])
+        self._show_suspicious_message("Пока нет сигнала", active=False)
 
     def scan_cameras(self) -> None:
         """Ищет подключенные камеры и выводит их список слева."""
@@ -511,6 +627,7 @@ class BurevestnikPrototype(ctk.CTk):
             self.capture = None
 
         self.tracker.reset()
+        self._reset_suspicious_state()
 
         if clear_screen:
             self.status_label.configure(text="Источник остановлен.")
@@ -572,10 +689,91 @@ class BurevestnikPrototype(ctk.CTk):
             self.future_label.configure(text="Отслеживание выключено из-за ошибки модели.")
             return frame
 
+        suspicious_points = find_suspicious_points(frame, detections)
+        detections.extend(self._handle_suspicious_points(suspicious_points))
+
         tracks = self.tracker.update(detections)
         draw_tracking_overlay(frame, tracks)
+        if self.pending_suspicious_point is not None:
+            draw_suspicious_point(frame, self.pending_suspicious_point)
         self._update_objects_table(tracks)
         return frame
+
+    def _handle_suspicious_points(self, points: list[SuspiciousPoint]):
+        """Связывает найденные темные точки с решениями оператора."""
+
+        usable_points = [
+            point
+            for point in points
+            if not point_near_any(
+                point.center,
+                self.ignored_suspicious_centers,
+                SUSPICIOUS_DOT_IGNORE_RADIUS,
+            )
+        ]
+
+        manual_detections = []
+        used_centers: list[tuple[int, int]] = []
+
+        for target in list(self.confirmed_suspicious_targets):
+            point = nearest_point(
+                target.center,
+                usable_points,
+                SUSPICIOUS_DOT_CONFIRM_RADIUS,
+            )
+
+            if point is None:
+                target.missed_frames += 1
+                if target.missed_frames > TRACK_MAX_LOST_FRAMES:
+                    self.confirmed_suspicious_targets.remove(target)
+                continue
+
+            target.center = point.center
+            target.missed_frames = 0
+            used_centers.append(point.center)
+            manual_detections.append(make_detection(point, target.label))
+
+        usable_points = [
+            point
+            for point in usable_points
+            if not point_near_any(point.center, used_centers, SUSPICIOUS_DOT_CONFIRM_RADIUS)
+        ]
+
+        if self.pending_suspicious_point is not None:
+            refreshed = nearest_point(
+                self.pending_suspicious_point.center,
+                usable_points,
+                SUSPICIOUS_DOT_CONFIRM_RADIUS,
+            )
+            if refreshed is None:
+                self.pending_suspicious_point = None
+                self._show_suspicious_message("Пока нет сигнала", active=False)
+            else:
+                self.pending_suspicious_point = refreshed
+                self._show_suspicious_message(
+                    f"Возможная дальняя цель: {refreshed.center[0]}, {refreshed.center[1]}",
+                    active=True,
+                )
+        elif usable_points:
+            self.pending_suspicious_point = usable_points[0]
+            self.suspicious_entry.delete(0, "end")
+            self.suspicious_entry.insert(0, SUSPICIOUS_DOT_DEFAULT_LABEL)
+            self._show_suspicious_message(
+                f"Возможная дальняя цель: {usable_points[0].center[0]}, {usable_points[0].center[1]}",
+                active=True,
+            )
+        elif not self.confirmed_suspicious_targets:
+            self._show_suspicious_message("Пока нет сигнала", active=False)
+
+        return manual_detections
+
+    def _reset_suspicious_state(self) -> None:
+        self.pending_suspicious_point = None
+        self.ignored_suspicious_centers.clear()
+        self.confirmed_suspicious_targets.clear()
+        if hasattr(self, "suspicious_entry"):
+            self.suspicious_entry.delete(0, "end")
+            self.suspicious_entry.insert(0, SUSPICIOUS_DOT_DEFAULT_LABEL)
 
     def _update_objects_table(self, tracks: list[Track]) -> None:
         """Обновляет таблицу объектов в левой панели."""
@@ -655,4 +853,3 @@ class BurevestnikPrototype(ctk.CTk):
         # Закрываем окно без хвостов: источник отпущен, таймер кадра отменен.
         self.stop_source(clear_screen=False)
         self.destroy()
-
