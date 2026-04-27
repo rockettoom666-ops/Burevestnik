@@ -1,0 +1,68 @@
+from __future__ import annotations
+
+import cv2
+
+from буревестник.настройки import MAX_TRACKED_OBJECTS, TRACK_COLORS
+from буревестник.сущности import Track
+
+
+def draw_tracking_overlay(frame, tracks: list[Track]) -> None:
+    """Рисует рамки, ID, центр и траекторию поверх кадра."""
+
+    for track in tracks[:MAX_TRACKED_OBJECTS]:
+        x1, y1, x2, y2 = track.bbox
+        cx, cy = track.center
+
+        color = color_for_id(track.track_id)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        cv2.circle(frame, (cx, cy), 4, color, -1)
+
+        title = f"ID {track.track_id} | {track.label} | {cx},{cy}"
+        cv2.putText(
+            frame,
+            title,
+            (x1, max(22, y1 - 10)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.58,
+            color,
+            2,
+            cv2.LINE_AA,
+        )
+
+        confidence = f"{track.confidence * 100:.0f}%"
+        cv2.putText(
+            frame,
+            confidence,
+            (x1, min(frame.shape[0] - 8, y2 + 20)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (230, 230, 230),
+            1,
+            cv2.LINE_AA,
+        )
+
+        if len(track.trace) > 1:
+            points = list(track.trace)
+            for index in range(1, len(points)):
+                cv2.line(frame, points[index - 1], points[index], color, 2, cv2.LINE_AA)
+
+
+def draw_waiting_label(frame, text: str) -> None:
+    """Пишет поверх кадра служебный текст, пока модель не готова."""
+
+    cv2.rectangle(frame, (16, 16), (390, 58), (15, 23, 42), -1)
+    cv2.putText(
+        frame,
+        text,
+        (28, 44),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.75,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
+
+
+def color_for_id(track_id: int) -> tuple[int, int, int]:
+    return TRACK_COLORS[(track_id - 1) % len(TRACK_COLORS)]
+
