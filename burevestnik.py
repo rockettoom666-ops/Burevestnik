@@ -16,7 +16,7 @@ CONF_LOW = 0.3
 TARGET_CLASSES = ["drone", "airplane", "helicopter"]
 MAX_TRACK_AGE = 60
 TRACK_DIST_THRESH = 0.7
-CLASS_THRESHOLDS = {"drone": 0.45, "airplane": 0.4, "helicopter": 0.35}
+CLASS_THRESHOLDS = {"drone": 0.30, "airplane": 0.4, "helicopter": 0.35}
 
 class Track:
     def __init__(self, track_id, bbox, label="unknown", conf=0.0):
@@ -195,6 +195,15 @@ class AirSpaceMonitor(ctk.CTk):
         self.selected_model_path = "best.pt"
         self.alarmed_track_ids = set()
         self.last_alarm_sound_at = 0.0
+        self.display_image_width = 0
+        self.display_image_height = 0
+        self.display_offset_x = 0
+        self.display_offset_y = 0
+        self.roi_first_point = None
+        self.frame_count = 0
+        self.last_detections = []
+        self.last_labels = []
+        self.last_confs = []
         self.bind("<KeyPress-z>", lambda e: self.enable_roi_selection())
         self.bind("<KeyPress-r>", lambda e: self.reset_roi())
         self.after(100, self._load_initial_model)
@@ -296,7 +305,6 @@ class AirSpaceMonitor(ctk.CTk):
         self.video_button.grid(row=4, column=0, padx=24, pady=(0,12), sticky="ew")
         self.pause_button = ctk.CTkButton(self.sidebar, text="Пауза", height=40, corner_radius=10, fg_color="#f59e0b", hover_color="#d97706", command=self.toggle_pause)
         self.pause_button.grid(row=5, column=0, padx=24, pady=(0,6), sticky="ew")
-        # Кнопка "Остановить" удалена
         self.detect_switch = ctk.CTkSwitch(self.sidebar, text="Показывать объекты", command=self.toggle_detections, onvalue=True, offvalue=False)
         self.detect_switch.select()
         self.detect_switch.grid(row=6, column=0, padx=24, pady=(0,12), sticky="w")
@@ -320,7 +328,7 @@ class AirSpaceMonitor(ctk.CTk):
         self.status_label = ctk.CTkLabel(self.sidebar, text="Готов к выбору источника", justify="left", wraplength=290, text_color="#9ca3af")
         self.status_label.grid(row=10, column=0, padx=24, pady=(0,22), sticky="ew")
 
-        # Правая часть
+        # Правая часть: видео + таблица под ним
         self.main = ctk.CTkFrame(self, corner_radius=0, fg_color="#0b1018")
         self.main.grid(row=0, column=1, sticky="nsew")
         self.main.grid_columnconfigure(0, weight=1)
@@ -377,6 +385,10 @@ class AirSpaceMonitor(ctk.CTk):
         if not self.show_detections:
             self.tracker = KalmanTracker()
             self.alarmed_track_ids.clear()
+            self.frame_count = 0
+            self.last_detections = []
+            self.last_labels = []
+            self.last_confs = []
         if self.paused: self._redraw_paused_frame()
 
     def toggle_pause(self):
@@ -394,8 +406,9 @@ class AirSpaceMonitor(ctk.CTk):
 
     def enable_roi_selection(self):
         self.selecting_roi = True
+        self.roi_first_point = None
         self.roi_start = None
-        self.status_label.configure(text="Режим выделения зоны. Обведите мышью на видео.")
+        self.status_label.configure(text="Режим выделения зоны. Нажмите первую точку на видео.")
 
     def reset_roi(self):
         self.roi = None
@@ -403,39 +416,71 @@ class AirSpaceMonitor(ctk.CTk):
         self.roi_anchor_frame = None
         self.selecting_roi = False
         self.roi_start = None
+        self.roi_first_point = None
         self.alarmed_track_ids.clear()
         self.status_label.configure(text="Зона интереса сброшена.")
         if self.paused: self._redraw_paused_frame()
 
     def _on_mouse_press(self, event):
         if not self.selecting_roi: return
-        self.roi_start = (event.x, event.y)
+        
+        if self.roi_first_point is None:
+            # Первый клик - сохраняем первую точку (используя абсолютные координаты)
+            self.roi_first_point = (event.x_root, event.y_root)
+            self.status_label.configure(text="Первая точка установлена. Нажмите вторую точку.")
+        else:
+            # Второй клик - строим ROI (используя абсолютные координаты)
+            self._complete_roi_selection(event.x_root, event.y_root)
 
-    def _on_mouse_drag(self, event): pass
+    def _on_mouse_drag(self, event): 
+        pass
 
-    def _on_mouse_release(self, event):
-        if not self.selecting_roi or self.roi_start is None: return
-        x1, y1 = self.roi_start
-        x2, y2 = event.x, event.y
+    def _complete_roi_selection(self, x2_root, y2_root):
+        x1_root, y1_root = self.roi_first_point
         if self.capture is not None:
-            if self.current_pil_image is None: return
-            lw = self.video_label.winfo_width()
-            lh = self.video_label.winfo_height()
-            if lw < 10 or lh < 10: return
-
-            imw, imh = self.current_pil_image.size
-            offset_x = (lw - imw) // 2
-            offset_y = (lh - imh) // 2
-
+            if self.last_raw_frame is None: return
+            
+            # Получаем абсолютные координаты виджета label на экране
+            label_root_x = self.video_label.winfo_rootx()
+            label_root_y = self.video_label.winfo_rooty()
+            
+            # Размеры и положение отображаемого изображения
+            imw = self.display_image_width
+            imh = self.display_image_height
+            offset_x = self.display_offset_x
+            offset_y = self.display_offset_y
+            
+            # Преобразуем абсолютные координаты экрана в координаты лейбла
+            x1 = x1_root - label_root_x
+            y1 = y1_root - label_root_y
+            x2 = x2_root - label_root_x
+            y2 = y2_root - label_root_y
+            
+            # Отладка
+            print(f"Label widget: rootx={label_root_x}, rooty={label_root_y}")
+            print(f"Клик 1 абс: ({x1_root}, {y1_root}), Клик 2 абс: ({x2_root}, {y2_root})")
+            print(f"Клик 1 отн: ({x1}, {y1}), Клик 2 отн: ({x2}, {y2})")
+            print(f"Размер отображённого изображения: {imw}x{imh}")
+            print(f"Смещение в лейбле: offset_x={offset_x}, offset_y={offset_y}")
+            
+            # Преобразуем координаты лейбла в координаты изображения
             ix1 = x1 - offset_x
             iy1 = y1 - offset_y
             ix2 = x2 - offset_x
             iy2 = y2 - offset_y
 
+            print(f"Координаты на изображении до ограничения: ({ix1}, {iy1}) -> ({ix2}, {iy2})")
+
+            # Нормализуем координаты (получаем левый-верхний и правый-нижний углы)
+            ix1, ix2 = min(ix1, ix2), max(ix1, ix2)
+            iy1, iy2 = min(iy1, iy2), max(iy1, iy2)
+
             ix1 = max(0, min(ix1, imw - 1))
             iy1 = max(0, min(iy1, imh - 1))
             ix2 = max(0, min(ix2, imw - 1))
             iy2 = max(0, min(iy2, imh - 1))
+
+            print(f"Координаты на изображении после ограничения и нормализации: ({ix1}, {iy1}) -> ({ix2}, {iy2})")
 
             fw = int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH))
             fh = int(self.capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -443,11 +488,16 @@ class AirSpaceMonitor(ctk.CTk):
 
             sx = fw / imw
             sy = fh / imh
+            
+            print(f"Размер исходного видео: {fw}x{fh}")
+            print(f"Масштабирование: sx={sx}, sy={sy}")
 
             rx1 = int(ix1 * sx)
             ry1 = int(iy1 * sy)
             rx2 = int(ix2 * sx)
             ry2 = int(iy2 * sy)
+
+            print(f"ROI в исходном видео: ({rx1}, {ry1}) -> ({rx2}, {ry2})")
 
             self.roi = (rx1, ry1, rx2, ry2)
             if self.last_gray is not None:
@@ -459,7 +509,12 @@ class AirSpaceMonitor(ctk.CTk):
             ac = len(self.roi_anchors) if self.roi_anchors is not None else 0
             self.status_label.configure(text=f"Зона задана. Якорей: {ac}")
             self.selecting_roi = False
+            self.roi_first_point = None
             if self.paused: self._redraw_paused_frame()
+
+    def _on_mouse_release(self, event):
+        # При новой системе выделения по двум точкам обработка в _on_mouse_press
+        pass
 
     def _find_roi_anchors(self, gray_frame):
         if self.roi is None: return None
@@ -609,6 +664,7 @@ class AirSpaceMonitor(ctk.CTk):
         self.pause_button.configure(text="Пауза")
         self.tracker = KalmanTracker()
         self.alarmed_track_ids.clear()
+        self.frame_count = 0
         if clear_screen:
             self.status_label.configure(text="Источник остановлен.")
             self.show_empty_view()
@@ -660,44 +716,57 @@ class AirSpaceMonitor(ctk.CTk):
         if not self.paused and self.roi_anchors is not None:
             self._update_roi_position(self.last_gray)
 
-        sharpen_kernel = np.array([[0,-1,0],[-1,5,-1],[0,-1,0]])
-        sharp = cv2.filter2D(frame, -1, sharpen_kernel)
-        lab = cv2.cvtColor(sharp, cv2.COLOR_BGR2LAB)
-        l,a,b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-        l = clahe.apply(l)
-        enhanced = cv2.cvtColor(cv2.merge((l,a,b)), cv2.COLOR_LAB2BGR)
+        # Используем кэшированные детекции
+        detections, labels, confs = self.last_detections, self.last_labels, self.last_confs
+        
+        # Запускаем YOLO только каждый 2-й кадр для ускорения
+        if self.frame_count % 2 == 0:
+            sharpen_kernel = np.array([[0,-1,0],[-1,5,-1],[0,-1,0]])
+            sharp = cv2.filter2D(frame, -1, sharpen_kernel)
+            lab = cv2.cvtColor(sharp, cv2.COLOR_BGR2LAB)
+            l,a,b = cv2.split(lab)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+            l = clahe.apply(l)
+            enhanced = cv2.cvtColor(cv2.merge((l,a,b)), cv2.COLOR_LAB2BGR)
 
-        results = self.model(enhanced, augment=False, conf=CONF_THRESHOLD, verbose=False)[0]
-        detections, labels, confs = [], [], []
-        for box in results.boxes:
-            conf = float(box.conf[0])
-            x1,y1,x2,y2 = map(int, box.xyxy[0])
-            area = (x2-x1)*(y2-y1)
-            cls_id = int(box.cls[0])
-            label = self.model.names[cls_id]
-            if label not in TARGET_CLASSES: continue
-            cls_thresh = CLASS_THRESHOLDS.get(label, CONF_THRESHOLD)
-            if area<5000: cls_thresh -= 0.1
-            if conf < cls_thresh: continue
-            detections.append([x1,y1,x2,y2])
-            labels.append(label)
-            confs.append(conf)
-
-        if len(detections)==0:
-            results_low = self.model(enhanced, augment=True, conf=CONF_LOW, verbose=False)[0]
-            for box in results_low.boxes:
+            results = self.model(enhanced, augment=False, conf=CONF_THRESHOLD, verbose=False)[0]
+            detections, labels, confs = [], [], []
+            for box in results.boxes:
                 conf = float(box.conf[0])
                 x1,y1,x2,y2 = map(int, box.xyxy[0])
                 area = (x2-x1)*(y2-y1)
                 cls_id = int(box.cls[0])
                 label = self.model.names[cls_id]
                 if label not in TARGET_CLASSES: continue
-                eff = CONF_LOW - 0.1 if area<5000 else CONF_LOW
-                if conf < eff: continue
+                cls_thresh = CLASS_THRESHOLDS.get(label, CONF_THRESHOLD)
+                if area<5000: cls_thresh -= 0.1
+                if conf < cls_thresh: continue
                 detections.append([x1,y1,x2,y2])
                 labels.append(label)
                 confs.append(conf)
+
+            # Если ничего не нашли, пробуем еще раз с более низким порогом (без augment)
+            if len(detections)==0:
+                results_low = self.model(enhanced, augment=False, conf=CONF_LOW, verbose=False)[0]
+                for box in results_low.boxes:
+                    conf = float(box.conf[0])
+                    x1,y1,x2,y2 = map(int, box.xyxy[0])
+                    area = (x2-x1)*(y2-y1)
+                    cls_id = int(box.cls[0])
+                    label = self.model.names[cls_id]
+                    if label not in TARGET_CLASSES: continue
+                    eff = CONF_LOW - 0.1 if area<5000 else CONF_LOW
+                    if conf < eff: continue
+                    detections.append([x1,y1,x2,y2])
+                    labels.append(label)
+                    confs.append(conf)
+
+            # Кэшируем детекции
+            self.last_detections = detections
+            self.last_labels = labels
+            self.last_confs = confs
+        
+        self.frame_count += 1
 
         for i in range(len(detections)):
             if labels[i]!="drone": continue
@@ -805,6 +874,11 @@ class AirSpaceMonitor(ctk.CTk):
         self.current_pil_image = image
         self.current_photo = ImageTk.PhotoImage(image)
         self.video_label.configure(image=self.current_photo, text="")
+        
+        # Сохраняем размеры и смещение отображаемого изображения
+        self.display_image_width, self.display_image_height = image.size
+        self.display_offset_x = (lw - self.display_image_width) // 2
+        self.display_offset_y = (lh - self.display_image_height) // 2
 
     def _update_header(self, source=None, mode=None, fps=None, resolution=None):
         if source is not None: self.source_card.configure(text=source)
