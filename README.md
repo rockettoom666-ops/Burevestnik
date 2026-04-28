@@ -67,3 +67,7 @@ git switch codex/modular-prototype
 ```
 
 В `main` остается версия на базе `burevestnik.py`.
+
+## Дополнительные материалы
+
+Видеоматериалы, использованные в тестировании: https://disk.yandex.ru/d/9NNqnV8gswbdsw
