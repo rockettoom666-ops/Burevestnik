@@ -41,8 +41,7 @@
 ---
 
 ## Установка и запуск
-git clone <url>
-cd Burevestnik
+git clone https://github.com/rockettoom666-ops/Burevestnik.git\n cd Burevestnik
 pip install -r requirements.txt
 python burevestnik_gui.py
 
