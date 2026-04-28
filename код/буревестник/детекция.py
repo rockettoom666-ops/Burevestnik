@@ -68,7 +68,7 @@ def list_yolo_model_choices() -> list[YoloModelChoice]:
 
     raw_choices = [
         ("Основная best.pt", YOLO_MODEL_NAME, VIDEO_ANALYSIS_FRAME_INTERVAL),
-        ("Тест best_1.pt", PROJECT_ROOT / "модели" / "best_1.pt", 15),
+        ("Модель best_1.pt", PROJECT_ROOT / "модели" / "best_1.pt", 15),
     ]
 
     env_model = os.environ.get(YOLO_MODEL_ENV_VAR)
@@ -104,7 +104,7 @@ def list_yolo_model_choices() -> list[YoloModelChoice]:
 
 def _scan_extra_model_files(known_paths: set[Path]) -> list[Path]:
     model_files: list[Path] = []
-    folders = [PROJECT_ROOT / "модели", PROJECT_ROOT / "тест_модели"]
+    folders = [PROJECT_ROOT / "модели"]
 
     for folder in folders:
         if not folder.exists():
