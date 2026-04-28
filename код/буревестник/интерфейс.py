@@ -32,6 +32,10 @@ from буревестник.сущности import CameraInfo, Track
 from буревестник.трекер import SimpleTracker
 
 
+ALARM_SOUND_PATH = Path(__file__).resolve().parents[2] / "ресурсы" / "тревога.wav"
+ALARM_SOUND_COOLDOWN_SECONDS = 2.0
+
+
 class BurevestnikPrototype(ctk.CTk):
     """Главное окно приложения.
 
@@ -95,6 +99,9 @@ class BurevestnikPrototype(ctk.CTk):
         self.detector_loading = False
         self.tracker = SimpleTracker()
         self.last_tracks: list[Track] = []
+        self.alerted_track_ids: set[int] = set()
+        self.alert_reset_job: str | None = None
+        self.last_alarm_sound_at = 0.0
 
         # При закрытии окна важно отпустить камеру, иначе она может остаться
         # занятой процессом Python.
@@ -120,7 +127,7 @@ class BurevestnikPrototype(ctk.CTk):
         self.main = ctk.CTkFrame(self, corner_radius=0, fg_color="#0b1018")
         self.main.grid(row=0, column=1, sticky="nsew")
         self.main.grid_columnconfigure(0, weight=1)
-        self.main.grid_rowconfigure(1, weight=1)
+        self.main.grid_rowconfigure(2, weight=1)
 
         title = ctk.CTkLabel(
             self.sidebar,
@@ -272,10 +279,22 @@ class BurevestnikPrototype(ctk.CTk):
         self.fps_card = self._make_info_block(self.header, "FPS", "-", 2)
         self.resolution_card = self._make_info_block(self.header, "Кадр", self.current_resolution, 3)
 
+        self.alert_label = ctk.CTkLabel(
+            self.main,
+            text="Оповещение: новых объектов нет",
+            height=34,
+            fg_color="#111827",
+            corner_radius=10,
+            text_color="#94a3b8",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            anchor="w",
+        )
+        self.alert_label.grid(row=1, column=0, sticky="ew", padx=26, pady=(0, 6))
+
         # Здесь показывается реальное видео. Поверх него рисуются рамки,
         # номера и координаты, если включено отслеживание.
         self.video_frame = ctk.CTkFrame(self.main, fg_color="#05070b", corner_radius=18)
-        self.video_frame.grid(row=1, column=0, sticky="nsew", padx=26, pady=(8, 14))
+        self.video_frame.grid(row=2, column=0, sticky="nsew", padx=26, pady=(8, 14))
         self.video_frame.grid_columnconfigure(0, weight=1)
         self.video_frame.grid_rowconfigure(0, weight=1)
 
@@ -289,12 +308,12 @@ class BurevestnikPrototype(ctk.CTk):
         self.video_label.grid(row=0, column=0, sticky="nsew", padx=18, pady=18)
 
         self.objects_panel = ctk.CTkFrame(self.main, fg_color="#0b1018", corner_radius=0)
-        self.objects_panel.grid(row=2, column=0, sticky="ew", padx=26, pady=(0, 10))
+        self.objects_panel.grid(row=3, column=0, sticky="ew", padx=26, pady=(0, 10))
         self.objects_panel.grid_columnconfigure(0, weight=1)
         self._build_objects_table(self.objects_panel)
 
         self.footer = ctk.CTkFrame(self.main, height=58, fg_color="#0b1018", corner_radius=0)
-        self.footer.grid(row=3, column=0, sticky="ew", padx=26, pady=(0, 20))
+        self.footer.grid(row=4, column=0, sticky="ew", padx=26, pady=(0, 20))
         self.footer.grid_columnconfigure(0, weight=1)
 
         self.future_label = ctk.CTkLabel(
@@ -454,6 +473,9 @@ class BurevestnikPrototype(ctk.CTk):
         self.detector_model = None
         self.tracker.reset()
         self.last_tracks = []
+        self.alerted_track_ids.clear()
+        self._reset_alert_banner()
+        self._stop_object_alert_sound()
         self._update_objects_table([])
         self.model_debug_label.configure(text=self._model_debug_text())
 
@@ -486,6 +508,9 @@ class BurevestnikPrototype(ctk.CTk):
         self.tracking_enabled = bool(self.tracking_switch.get())
         self.tracker.reset()
         self.last_tracks = []
+        self.alerted_track_ids.clear()
+        self._reset_alert_banner()
+        self._stop_object_alert_sound()
         self._update_objects_table([])
 
         if not self.tracking_enabled:
@@ -749,6 +774,9 @@ class BurevestnikPrototype(ctk.CTk):
 
         self.tracker.reset()
         self.last_tracks = []
+        self.alerted_track_ids.clear()
+        self._reset_alert_banner()
+        self._stop_object_alert_sound()
 
         if clear_screen:
             self.status_label.configure(text="Источник остановлен.")
@@ -833,9 +861,112 @@ class BurevestnikPrototype(ctk.CTk):
 
         tracks = self.tracker.update(detections)
         self.last_tracks = tracks
+        self._handle_object_alerts(tracks)
         draw_tracking_overlay(frame, tracks)
         self._update_objects_table(tracks)
         return frame
+
+    def _handle_object_alerts(self, tracks: list[Track]) -> None:
+        """Подает тревогу только для реально новых ID, а не для уже знакомых объектов."""
+
+        new_tracks = [
+            track
+            for track in tracks
+            if track.track_id not in self.alerted_track_ids
+        ]
+        if not new_tracks:
+            return
+
+        for track in new_tracks:
+            self.alerted_track_ids.add(track.track_id)
+
+        first_track = new_tracks[0]
+        cx, cy = first_track.center
+        label = YOLO_LABELS_RU.get(first_track.label, first_track.label)
+
+        if len(new_tracks) == 1:
+            text = f"Новый объект: ID {first_track.track_id} | {label} | X {cx} Y {cy}"
+        else:
+            text = f"Новые объекты: {len(new_tracks)} | первый ID {first_track.track_id} | {label}"
+
+        self._show_object_alert(text)
+        self._play_object_alert_sound()
+
+    def _show_object_alert(self, text: str) -> None:
+        if self.alert_reset_job is not None:
+            self.after_cancel(self.alert_reset_job)
+            self.alert_reset_job = None
+
+        self.alert_label.configure(
+            text=text,
+            fg_color="#991b1b",
+            text_color="#ffffff",
+        )
+        self.status_label.configure(text=text)
+        self.alert_reset_job = self.after(3200, self._reset_alert_banner)
+
+    def _reset_alert_banner(self) -> None:
+        if not hasattr(self, "alert_label"):
+            return
+
+        if self.alert_reset_job is not None:
+            try:
+                self.after_cancel(self.alert_reset_job)
+            except ValueError:
+                pass
+            self.alert_reset_job = None
+
+        self.alert_label.configure(
+            text="Оповещение: новых объектов нет",
+            fg_color="#111827",
+            text_color="#94a3b8",
+        )
+
+    def _play_object_alert_sound(self) -> None:
+        """Воспроизводит WAV-тревогу и перезапускает ее при каждом новом появлении."""
+
+        now = time.monotonic()
+        if now - self.last_alarm_sound_at < ALARM_SOUND_COOLDOWN_SECONDS:
+            return
+        self.last_alarm_sound_at = now
+
+        if os.name != "nt":
+            for delay in range(0, 1200, 260):
+                self.after(delay, self.bell)
+            return
+
+        def worker() -> None:
+            try:
+                import winsound
+
+                winsound.PlaySound(None, 0)
+                if ALARM_SOUND_PATH.exists():
+                    winsound.PlaySound(
+                        str(ALARM_SOUND_PATH),
+                        winsound.SND_FILENAME | winsound.SND_ASYNC,
+                    )
+                    return
+
+                winsound.MessageBeep(winsound.MB_ICONHAND)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _stop_object_alert_sound(self) -> None:
+        """Останавливает WAV-тревогу, если оператор выключил источник или закрыл окно."""
+
+        self.last_alarm_sound_at = 0.0
+
+        if os.name != "nt":
+            return
+
+        try:
+            import winsound
+
+            winsound.PlaySound(None, 0)
+        except Exception:
+            pass
 
     def _update_objects_table(self, tracks: list[Track]) -> None:
         """Обновляет живую таблицу объектов под видеопотоком."""
