@@ -41,10 +41,12 @@
 ---
 
 ## Установка и запуск
-**git clone https://github.com/rockettoom666-ops/Burevestnik.git**
-**cd Burevestnik**
-**pip install -r requirements.txt**
-**python burevestnik_gui.py**
+-**git clone https://github.com/rockettoom666-ops/Burevestnik.git**
+-**cd Burevestnik**
+-**pip install -r requirements.txt**
+-**python burevestnik_gui.py**
+
+---
 
 ### Интерфейс и управление
 «Работать с камерой» – поиск и подключение веб-камеры (индексы 0–9).
