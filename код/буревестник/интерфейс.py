@@ -11,28 +11,22 @@ import cv2
 import customtkinter as ctk
 from PIL import Image, ImageTk
 
-from буревестник.детекция import detect_objects, load_yolo_model
+from буревестник.детекция import (
+    YoloModelChoice,
+    detect_objects,
+    get_yolo_model_title,
+    list_yolo_model_choices,
+    load_yolo_model,
+)
 from буревестник.настройки import (
     MAX_TRACKED_OBJECTS,
-    SUSPICIOUS_DOT_CONFIRM_RADIUS,
-    SUSPICIOUS_DOT_DEFAULT_LABEL,
-    SUSPICIOUS_DOT_IGNORE_RADIUS,
-    TRACK_MAX_LOST_FRAMES,
+    VIDEO_ANALYSIS_FRAME_INTERVAL,
     YOLO_LABELS_RU,
+    YOLO_MODEL_ENV_VAR,
 )
 from буревестник.отрисовка import (
-    draw_suspicious_point,
     draw_tracking_overlay,
     draw_waiting_label,
-)
-from буревестник.подозрительные_точки import (
-    ConfirmedSuspiciousTarget,
-    SuspiciousMotionTracker,
-    SuspiciousPoint,
-    find_suspicious_points,
-    make_detection,
-    nearest_point,
-    point_near_any,
 )
 from буревестник.сущности import CameraInfo, Track
 from буревестник.трекер import SimpleTracker
@@ -79,6 +73,17 @@ class BurevestnikPrototype(ctk.CTk):
         self.video_delay_ms = 15
         self.last_frame_at = time.perf_counter()
         self.smoothed_fps = 0.0
+        self.frame_counter = 0
+
+        # В отладке можно переключать версии модели без отдельного файла запуска.
+        # Список строится по реально найденным .pt-файлам.
+        self.model_choices = list_yolo_model_choices()
+        self.model_choices_by_label = {choice.label: choice for choice in self.model_choices}
+        self.selected_model_choice = self._select_initial_model_choice()
+        self.selected_model_path = self.selected_model_choice.path if self.selected_model_choice else None
+        if self.selected_model_path is not None:
+            os.environ[YOLO_MODEL_ENV_VAR] = str(self.selected_model_path)
+        self.video_analysis_frame_interval = self._read_video_analysis_frame_interval()
 
         # Флаг защищает от повторного запуска поиска камер по двойному клику.
         self.scanning = False
@@ -89,10 +94,7 @@ class BurevestnikPrototype(ctk.CTk):
         self.detector_model: Any | None = None
         self.detector_loading = False
         self.tracker = SimpleTracker()
-        self.suspicious_motion_tracker = SuspiciousMotionTracker()
-        self.pending_suspicious_point: SuspiciousPoint | None = None
-        self.ignored_suspicious_centers: list[tuple[int, int]] = []
-        self.confirmed_suspicious_targets: list[ConfirmedSuspiciousTarget] = []
+        self.last_tracks: list[Track] = []
 
         # При закрытии окна важно отпустить камеру, иначе она может остаться
         # занятой процессом Python.
@@ -185,13 +187,59 @@ class BurevestnikPrototype(ctk.CTk):
         )
         self.tracking_switch.grid(row=5, column=0, padx=24, pady=(0, 18), sticky="w")
 
+        self.debug_model_frame = ctk.CTkFrame(
+            self.sidebar,
+            fg_color="#0f172a",
+            corner_radius=12,
+        )
+        self.debug_model_frame.grid(row=6, column=0, padx=24, pady=(0, 14), sticky="ew")
+        self.debug_model_frame.grid_columnconfigure(0, weight=1)
+
+        debug_title = ctk.CTkLabel(
+            self.debug_model_frame,
+            text="Отладка модели",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            text_color="#e5e7eb",
+            anchor="w",
+        )
+        debug_title.grid(row=0, column=0, padx=12, pady=(10, 4), sticky="ew")
+
+        model_values = [choice.label for choice in self.model_choices] or ["Модели не найдены"]
+        self.model_choice_menu = ctk.CTkOptionMenu(
+            self.debug_model_frame,
+            values=model_values,
+            command=self.change_debug_model,
+            fg_color="#1f2937",
+            button_color="#334155",
+            button_hover_color="#475569",
+            dropdown_fg_color="#111827",
+            dropdown_hover_color="#1f2937",
+            text_color="#e5e7eb",
+            height=34,
+        )
+        self.model_choice_menu.grid(row=1, column=0, padx=12, pady=(0, 8), sticky="ew")
+        if self.selected_model_choice is not None:
+            self.model_choice_menu.set(self.selected_model_choice.label)
+        else:
+            self.model_choice_menu.configure(state="disabled")
+
+        self.model_debug_label = ctk.CTkLabel(
+            self.debug_model_frame,
+            text=self._model_debug_text(),
+            justify="left",
+            wraplength=250,
+            text_color="#94a3b8",
+            anchor="w",
+        )
+        self.model_debug_label.grid(row=2, column=0, padx=12, pady=(0, 10), sticky="ew")
+
         cameras_title = ctk.CTkLabel(
             self.sidebar,
             text="Найденные камеры",
             font=ctk.CTkFont(size=16, weight="bold"),
             text_color="#e5e7eb",
         )
-        cameras_title.grid(row=6, column=0, padx=24, pady=(0, 8), sticky="w")
+        cameras_title.grid(row=7, column=0, padx=24, pady=(0, 8), sticky="w")
 
         self.camera_list = ctk.CTkScrollableFrame(
             self.sidebar,
@@ -199,67 +247,10 @@ class BurevestnikPrototype(ctk.CTk):
             corner_radius=12,
             height=145,
         )
-        self.camera_list.grid(row=7, column=0, padx=24, pady=(0, 14), sticky="ew")
+        self.camera_list.grid(row=8, column=0, padx=24, pady=(0, 14), sticky="ew")
         self.camera_list.grid_columnconfigure(0, weight=1)
 
-        self.suspicious_frame = ctk.CTkFrame(
-            self.sidebar,
-            fg_color="#1b2333",
-            corner_radius=12,
-        )
-        self.suspicious_frame.grid(row=8, column=0, padx=24, pady=(0, 14), sticky="ew")
-        self.suspicious_frame.grid_columnconfigure(0, weight=1)
-        self.suspicious_frame.grid_columnconfigure(1, weight=1)
-
-        self.suspicious_title = ctk.CTkLabel(
-            self.suspicious_frame,
-            text="Подозрительная точка",
-            font=ctk.CTkFont(size=15, weight="bold"),
-            text_color="#facc15",
-            anchor="w",
-        )
-        self.suspicious_title.grid(row=0, column=0, columnspan=2, padx=12, pady=(10, 0), sticky="ew")
-
-        self.suspicious_label = ctk.CTkLabel(
-            self.suspicious_frame,
-            text="Пока нет сигнала",
-            justify="left",
-            wraplength=250,
-            text_color="#cbd5e1",
-            anchor="w",
-        )
-        self.suspicious_label.grid(row=1, column=0, columnspan=2, padx=12, pady=(2, 8), sticky="ew")
-
-        self.suspicious_entry = ctk.CTkEntry(
-            self.suspicious_frame,
-            placeholder_text="Подпись цели",
-            height=32,
-        )
-        self.suspicious_entry.insert(0, SUSPICIOUS_DOT_DEFAULT_LABEL)
-        self.suspicious_entry.grid(row=2, column=0, columnspan=2, padx=12, pady=(0, 8), sticky="ew")
-
-        self.suspicious_yes_button = ctk.CTkButton(
-            self.suspicious_frame,
-            text="Это цель",
-            height=32,
-            fg_color="#eab308",
-            hover_color="#ca8a04",
-            command=self.confirm_suspicious_point,
-        )
-        self.suspicious_yes_button.grid(row=3, column=0, padx=(12, 6), pady=(0, 12), sticky="ew")
-
-        self.suspicious_no_button = ctk.CTkButton(
-            self.suspicious_frame,
-            text="Не цель",
-            height=32,
-            fg_color="#475569",
-            hover_color="#334155",
-            command=self.ignore_suspicious_point,
-        )
-        self.suspicious_no_button.grid(row=3, column=1, padx=(6, 12), pady=(0, 12), sticky="ew")
-        self._set_suspicious_buttons_enabled(False)
-
-        self.sidebar.grid_rowconfigure(9, weight=1)
+        self.sidebar.grid_rowconfigure(10, weight=1)
 
         self.status_label = ctk.CTkLabel(
             self.sidebar,
@@ -268,7 +259,7 @@ class BurevestnikPrototype(ctk.CTk):
             wraplength=270,
             text_color="#9ca3af",
         )
-        self.status_label.grid(row=10, column=0, padx=24, pady=(0, 22), sticky="ew")
+        self.status_label.grid(row=11, column=0, padx=24, pady=(0, 22), sticky="ew")
 
         self.header = ctk.CTkFrame(self.main, height=104, fg_color="#0b1018", corner_radius=0)
         self.header.grid(row=0, column=0, sticky="ew", padx=26, pady=(22, 8))
@@ -423,13 +414,78 @@ class BurevestnikPrototype(ctk.CTk):
         value_label.grid(row=1, column=0, padx=16, pady=(0, 12), sticky="ew")
         return value_label
 
+    def _select_initial_model_choice(self) -> YoloModelChoice | None:
+        if not self.model_choices:
+            return None
+        return self.model_choices[0]
+
+    def _model_debug_text(self) -> str:
+        if self.selected_model_choice is None:
+            return "Модели не найдены. Положи .pt файл в корень проекта или в папку теста."
+
+        return (
+            f"Файл: {self.selected_model_choice.path.name}\n"
+            f"Видео: анализ каждый {self.video_analysis_frame_interval}-й кадр"
+        )
+
+    def change_debug_model(self, label: str) -> None:
+        """Переключает модель прямо из интерфейса отладки."""
+
+        choice = self.model_choices_by_label.get(label)
+        if choice is None:
+            return
+
+        if self.detector_loading:
+            self.status_label.configure(text="Модель уже загружается. Дождись окончания и переключи еще раз.")
+            if self.selected_model_choice is not None:
+                self.model_choice_menu.set(self.selected_model_choice.label)
+            return
+
+        if self.selected_model_choice == choice:
+            self.model_debug_label.configure(text=self._model_debug_text())
+            return
+
+        self.selected_model_choice = choice
+        self.selected_model_path = choice.path
+        os.environ[YOLO_MODEL_ENV_VAR] = str(choice.path)
+        os.environ["BUREVESTNIK_VIDEO_ANALYSIS_INTERVAL"] = str(choice.video_interval)
+        self.video_analysis_frame_interval = self._read_video_analysis_frame_interval()
+
+        self.detector_model = None
+        self.tracker.reset()
+        self.last_tracks = []
+        self._update_objects_table([])
+        self.model_debug_label.configure(text=self._model_debug_text())
+
+        self.status_label.configure(text=f"Выбрана модель {choice.path.name}.")
+        self.future_label.configure(
+            text=f"Отладка: активна модель {choice.path.name}. Включи отслеживание или дождись перезагрузки."
+        )
+
+        if self.tracking_enabled:
+            self.status_label.configure(text=f"Выбрана модель {choice.path.name}. Перезагружаю детектор.")
+            self._load_detector_async()
+
+    def _read_video_analysis_frame_interval(self) -> int:
+        """Берет шаг анализа видео из окружения или из обычных настроек."""
+
+        raw_value = os.environ.get("BUREVESTNIK_VIDEO_ANALYSIS_INTERVAL", "").strip()
+        if not raw_value:
+            if self.selected_model_choice is not None:
+                return self.selected_model_choice.video_interval
+            return VIDEO_ANALYSIS_FRAME_INTERVAL
+
+        try:
+            return max(1, int(raw_value))
+        except ValueError:
+            return VIDEO_ANALYSIS_FRAME_INTERVAL
+
     def toggle_tracking(self) -> None:
         """Включает или выключает первый режим отслеживания."""
 
         self.tracking_enabled = bool(self.tracking_switch.get())
         self.tracker.reset()
-        self.suspicious_motion_tracker.reset()
-        self.pending_suspicious_point = None
+        self.last_tracks = []
         self._update_objects_table([])
 
         if not self.tracking_enabled:
@@ -437,51 +493,18 @@ class BurevestnikPrototype(ctk.CTk):
                 text="Отслеживание выключено. Видеопоток идет без рамок и номеров."
             )
             self.status_label.configure(text="Отслеживание выключено.")
-            self._show_suspicious_message("Пока нет сигнала", active=False)
             return
 
         self.future_label.configure(
-            text="Отслеживание включено: YOLO ищет объекты, простой трекер выдает ID и координаты."
+            text=(
+                "Отслеживание включено: модель ищет объекты, трекер выдает ID и координаты. "
+                f"В тестовом видео анализ идет каждый {self.video_analysis_frame_interval}-й кадр, чтобы поток не тормозил."
+            )
         )
         if self.detector_model is None:
             self._load_detector_async()
         else:
             self.status_label.configure(text="Отслеживание включено. Модель уже загружена.")
-
-    def confirm_suspicious_point(self) -> None:
-        """Оператор подтвердил: точку теперь считаем отдельной целью."""
-
-        if self.pending_suspicious_point is None:
-            return
-
-        label = self.suspicious_entry.get().strip() or SUSPICIOUS_DOT_DEFAULT_LABEL
-        self.confirmed_suspicious_targets.append(
-            ConfirmedSuspiciousTarget(
-                label=label,
-                center=self.pending_suspicious_point.center,
-            )
-        )
-        self.pending_suspicious_point = None
-        self._show_suspicious_message(f"Цель добавлена: {label}", active=False)
-
-    def ignore_suspicious_point(self) -> None:
-        """Оператор отклонил точку: рядом с ней больше не тревожим."""
-
-        if self.pending_suspicious_point is None:
-            return
-
-        self.ignored_suspicious_centers.append(self.pending_suspicious_point.center)
-        self.pending_suspicious_point = None
-        self._show_suspicious_message("Точка добавлена в игнор", active=False)
-
-    def _show_suspicious_message(self, text: str, active: bool) -> None:
-        self.suspicious_label.configure(text=text)
-        self._set_suspicious_buttons_enabled(active)
-
-    def _set_suspicious_buttons_enabled(self, enabled: bool) -> None:
-        state = "normal" if enabled else "disabled"
-        self.suspicious_yes_button.configure(state=state)
-        self.suspicious_no_button.configure(state=state)
 
     def _load_detector_async(self) -> None:
         """Загружает YOLO в отдельном потоке, чтобы окно не подвисало."""
@@ -489,21 +512,46 @@ class BurevestnikPrototype(ctk.CTk):
         if self.detector_loading:
             return
 
-        self.detector_loading = True
-        self.status_label.configure(text="Загружаю YOLO-модель. Первый запуск может занять время.")
+        if self.selected_model_path is None:
+            self._finish_detector_loading(
+                model=None,
+                error=FileNotFoundError("Не выбрана модель для отслеживания."),
+            )
+            return
 
-        thread = threading.Thread(target=self._load_detector_worker, daemon=True)
+        self.detector_loading = True
+        try:
+            model_title = get_yolo_model_title(self.selected_model_path)
+        except Exception as error:
+            self._finish_detector_loading(model=None, error=error)
+            return
+
+        if hasattr(self, "model_choice_menu"):
+            self.model_choice_menu.configure(state="disabled")
+        self.status_label.configure(text=f"Загружаю модель {model_title}. Первый запуск может занять время.")
+
+        thread = threading.Thread(target=self._load_detector_worker, args=(self.selected_model_path,), daemon=True)
         thread.start()
 
-    def _load_detector_worker(self) -> None:
+    def _load_detector_worker(self, model_path: Path) -> None:
         try:
-            model = load_yolo_model()
-            self.after(0, lambda: self._finish_detector_loading(model=model, error=None))
+            model = load_yolo_model(model_path)
+            self.after(0, lambda: self._finish_detector_loading(model=model, error=None, model_path=model_path))
         except Exception as error:
-            self.after(0, lambda: self._finish_detector_loading(model=None, error=error))
+            self.after(0, lambda: self._finish_detector_loading(model=None, error=error, model_path=model_path))
 
-    def _finish_detector_loading(self, model: Any | None, error: Exception | None) -> None:
+    def _finish_detector_loading(
+        self,
+        model: Any | None,
+        error: Exception | None,
+        model_path: Path | None = None,
+    ) -> None:
         self.detector_loading = False
+        if hasattr(self, "model_choice_menu") and self.model_choices:
+            self.model_choice_menu.configure(state="normal")
+
+        if model_path is not None and self.selected_model_path is not None and model_path != self.selected_model_path:
+            return
 
         if error is not None:
             self.detector_model = None
@@ -517,12 +565,14 @@ class BurevestnikPrototype(ctk.CTk):
                 "Не удалось включить отслеживание",
                 "YOLO-модель не загрузилась.\n\n"
                 f"Ошибка: {error}\n\n"
-                "Проверь, что установлена библиотека ultralytics.",
+                "Проверь, что установлена библиотека ultralytics, а файл модели лежит на указанном пути.",
             )
             return
 
         self.detector_model = model
-        self.status_label.configure(text="YOLO-модель загружена. Отслеживание готово к работе.")
+        model_title = get_yolo_model_title(self.selected_model_path)
+        self.status_label.configure(text=f"Модель {model_title} загружена. Отслеживание готово к работе.")
+        self.model_debug_label.configure(text=self._model_debug_text())
 
     def show_empty_view(self) -> None:
         self.video_label.configure(
@@ -531,7 +581,6 @@ class BurevestnikPrototype(ctk.CTk):
         )
         self._update_header(source="Источник не выбран", mode="Ожидание", fps="-", resolution="-")
         self._update_objects_table([])
-        self._show_suspicious_message("Пока нет сигнала", active=False)
 
     def scan_cameras(self) -> None:
         """Ищет подключенные камеры и выводит их список слева."""
@@ -623,6 +672,7 @@ class BurevestnikPrototype(ctk.CTk):
         self.video_delay_ms = 15
         self.smoothed_fps = 0.0
         self.last_frame_at = time.perf_counter()
+        self.frame_counter = 0
 
         if self.tracking_enabled:
             self.status_label.configure(text=f"Открыта {camera.title}. Идет живой поток с тестовым отслеживанием.")
@@ -672,9 +722,12 @@ class BurevestnikPrototype(ctk.CTk):
         self.video_delay_ms = max(1, int(1000 / fps))
         self.smoothed_fps = 0.0
         self.last_frame_at = time.perf_counter()
+        self.frame_counter = 0
 
         if self.tracking_enabled:
-            self.status_label.configure(text="Открыт видеофайл. Кадры анализируются в реальном времени.")
+            self.status_label.configure(
+                text=f"Открыт видеофайл. Для плавности модель анализирует каждый {self.video_analysis_frame_interval}-й кадр."
+            )
         else:
             self.status_label.configure(text="Открыт видеофайл. Он проигрывается как реальный поток, без заранее готовых результатов.")
         self._update_header(source=self.current_source, mode=self.current_mode, fps="-", resolution=self.current_resolution)
@@ -695,7 +748,7 @@ class BurevestnikPrototype(ctk.CTk):
             self.capture = None
 
         self.tracker.reset()
-        self._reset_suspicious_state()
+        self.last_tracks = []
 
         if clear_screen:
             self.status_label.configure(text="Источник остановлен.")
@@ -720,6 +773,8 @@ class BurevestnikPrototype(ctk.CTk):
             self.status_label.configure(text="Источник завершился или перестал отдавать кадры.")
             return
 
+        self.frame_counter += 1
+
         now = time.perf_counter()
         instant_fps = 1.0 / max(now - self.last_frame_at, 1e-6)
         self.last_frame_at = now
@@ -728,7 +783,10 @@ class BurevestnikPrototype(ctk.CTk):
         self.smoothed_fps = instant_fps if self.smoothed_fps == 0 else self.smoothed_fps * 0.88 + instant_fps * 0.12
 
         if self.tracking_enabled and self.detector_model is not None:
-            frame = self.process_frame_with_tracking(frame)
+            frame = self.process_frame_with_tracking(
+                frame,
+                run_detection=self._should_run_detection_on_frame(),
+            )
         elif self.tracking_enabled and self.detector_loading:
             draw_waiting_label(frame, "YOLO загружается...")
         elif self.tracking_enabled and self.detector_model is None:
@@ -740,7 +798,18 @@ class BurevestnikPrototype(ctk.CTk):
         self._update_header(fps=f"{self.smoothed_fps:.1f}")
         self._schedule_frame()
 
-    def process_frame_with_tracking(self, frame):
+    def _should_run_detection_on_frame(self) -> bool:
+        """Для видео не гоняем тяжелую модель на каждом кадре."""
+
+        if self.current_mode != "Тест на видео":
+            return True
+
+        return (
+            self.frame_counter == 1
+            or self.frame_counter % self.video_analysis_frame_interval == 0
+        )
+
+    def process_frame_with_tracking(self, frame, run_detection: bool = True):
         """Главная функция отслеживания: детекция, ID, рамки и таблица.
 
         Эту функцию мы и "привязали" к основному прототипу. Она не запускает
@@ -748,124 +817,25 @@ class BurevestnikPrototype(ctk.CTk):
         Поэтому камера, тестовое видео и будущие режимы остаются в одном месте.
         """
 
+        if not run_detection:
+            draw_tracking_overlay(frame, self.last_tracks)
+            return frame
+
         try:
             detections = detect_objects(frame, self.detector_model)
         except Exception as error:
             self.tracking_enabled = False
             self.tracking_switch.deselect()
+            self.last_tracks = []
             self.status_label.configure(text=f"Ошибка детекции: {error}")
             self.future_label.configure(text="Отслеживание выключено из-за ошибки модели.")
             return frame
 
-        raw_suspicious_points = find_suspicious_points(frame, detections)
-        moving_suspicious_points = self.suspicious_motion_tracker.update(raw_suspicious_points)
-        detections.extend(self._handle_suspicious_points(moving_suspicious_points, raw_suspicious_points))
-
         tracks = self.tracker.update(detections)
+        self.last_tracks = tracks
         draw_tracking_overlay(frame, tracks)
-        if self.pending_suspicious_point is not None:
-            draw_suspicious_point(frame, self.pending_suspicious_point)
         self._update_objects_table(tracks)
         return frame
-
-    def _handle_suspicious_points(
-        self,
-        moving_points: list[SuspiciousPoint],
-        raw_points: list[SuspiciousPoint],
-    ):
-        """Связывает найденные темные точки с решениями оператора."""
-
-        usable_raw_points = [
-            point
-            for point in raw_points
-            if not point_near_any(
-                point.center,
-                self.ignored_suspicious_centers,
-                SUSPICIOUS_DOT_IGNORE_RADIUS,
-            )
-        ]
-        usable_moving_points = [
-            point
-            for point in moving_points
-            if not point_near_any(
-                point.center,
-                self.ignored_suspicious_centers,
-                SUSPICIOUS_DOT_IGNORE_RADIUS,
-            )
-        ]
-
-        manual_detections = []
-        used_centers: list[tuple[int, int]] = []
-
-        for target in list(self.confirmed_suspicious_targets):
-            point = nearest_point(
-                target.center,
-                usable_raw_points,
-                SUSPICIOUS_DOT_CONFIRM_RADIUS,
-            )
-
-            if point is None:
-                target.missed_frames += 1
-                if target.missed_frames > TRACK_MAX_LOST_FRAMES:
-                    self.confirmed_suspicious_targets.remove(target)
-                continue
-
-            target.center = point.center
-            target.missed_frames = 0
-            used_centers.append(point.center)
-            manual_detections.append(make_detection(point, target.label))
-
-        usable_moving_points = [
-            point
-            for point in usable_moving_points
-            if not point_near_any(point.center, used_centers, SUSPICIOUS_DOT_CONFIRM_RADIUS)
-        ]
-        usable_raw_points = [
-            point
-            for point in usable_raw_points
-            if not point_near_any(point.center, used_centers, SUSPICIOUS_DOT_CONFIRM_RADIUS)
-        ]
-
-        if self.pending_suspicious_point is not None:
-            refreshed = nearest_point(
-                self.pending_suspicious_point.center,
-                usable_moving_points,
-                SUSPICIOUS_DOT_CONFIRM_RADIUS,
-            ) or nearest_point(
-                self.pending_suspicious_point.center,
-                usable_raw_points,
-                SUSPICIOUS_DOT_CONFIRM_RADIUS,
-            )
-            if refreshed is None:
-                self.pending_suspicious_point = None
-                self._show_suspicious_message("Пока нет сигнала", active=False)
-            else:
-                self.pending_suspicious_point = refreshed
-                self._show_suspicious_message(
-                    f"Возможная дальняя цель: {refreshed.center[0]}, {refreshed.center[1]}",
-                    active=True,
-                )
-        elif usable_moving_points:
-            self.pending_suspicious_point = usable_moving_points[0]
-            self.suspicious_entry.delete(0, "end")
-            self.suspicious_entry.insert(0, SUSPICIOUS_DOT_DEFAULT_LABEL)
-            self._show_suspicious_message(
-                f"Возможная дальняя цель: {usable_moving_points[0].center[0]}, {usable_moving_points[0].center[1]}",
-                active=True,
-            )
-        elif not self.confirmed_suspicious_targets:
-            self._show_suspicious_message("Пока нет сигнала", active=False)
-
-        return manual_detections
-
-    def _reset_suspicious_state(self) -> None:
-        self.pending_suspicious_point = None
-        self.suspicious_motion_tracker.reset()
-        self.ignored_suspicious_centers.clear()
-        self.confirmed_suspicious_targets.clear()
-        if hasattr(self, "suspicious_entry"):
-            self.suspicious_entry.delete(0, "end")
-            self.suspicious_entry.insert(0, SUSPICIOUS_DOT_DEFAULT_LABEL)
 
     def _update_objects_table(self, tracks: list[Track]) -> None:
         """Обновляет живую таблицу объектов под видеопотоком."""

@@ -1,46 +1,34 @@
 from __future__ import annotations
 
 # Настройки первого рабочего трекера.
-# Сейчас специально берем все классы YOLO, чтобы прототип можно было проверить
-# даже на обычной веб-камере: человек, бутылка или стул тоже получат ID.
-# Для финала сузим список до воздушных объектов и обученной модели дронов.
+# Теперь основной детектор - обученная модель напарника. Файл best.pt должен
+# лежать в корне проекта или в папке "модели".
 MAX_TRACKED_OBJECTS = 5
 DETECTION_CONFIDENCE = 0.50
 DETECTION_IOU = 0.45
 DETECTION_MAX_RESULTS = 8
+VIDEO_ANALYSIS_FRAME_INTERVAL = 5
 TRACK_MAX_DISTANCE = 70.0
 TRACK_MAX_LOST_FRAMES = 8
 TRACK_MIN_HITS = 2
 TRACK_MIN_IOU = 0.08
 
-YOLO_MODEL_NAME = "yolov8n.pt"
-
-# Настройки поиска дальних темных точек. Это не "готовая детекция дрона",
-# а аккуратный сигнал оператору: "здесь есть маленький темный объект,
-# который YOLO может не распознать".
-SUSPICIOUS_DOT_DARK_THRESHOLD = 70
-SUSPICIOUS_DOT_MIN_AREA = 10
-SUSPICIOUS_DOT_MAX_AREA = 120
-SUSPICIOUS_DOT_MIN_WIDTH = 4
-SUSPICIOUS_DOT_MIN_HEIGHT = 4
-SUSPICIOUS_DOT_MAX_WIDTH = 26
-SUSPICIOUS_DOT_MAX_HEIGHT = 26
-SUSPICIOUS_DOT_IGNORE_RADIUS = 48
-SUSPICIOUS_DOT_CONFIRM_RADIUS = 70
-SUSPICIOUS_DOT_DEFAULT_LABEL = "drone?"
-SUSPICIOUS_DOT_MATCH_RADIUS = 36
-SUSPICIOUS_DOT_MIN_FRAMES = 4
-SUSPICIOUS_DOT_MIN_MOVE = 10.0
-SUSPICIOUS_DOT_MIN_PATH = 14.0
-SUSPICIOUS_DOT_MAX_MISSED_FRAMES = 3
-SUSPICIOUS_DOT_TRAJECTORY_LENGTH = 8
+YOLO_MODEL_NAME = "best.pt"
+YOLO_MODEL_ENV_VAR = "BUREVESTNIK_MODEL"
 
 YOLO_LABELS_RU = {
+    "aerial-object": "воздушная цель",
+    "drone": "дрон",
+    "Drone": "дрон",
+    "uav": "дрон",
+    "UAV": "дрон",
+    "БПЛА": "дрон",
     "person": "человек",
     "bicycle": "велосипед",
     "car": "машина",
     "motorcycle": "мотоцикл",
     "airplane": "самолет",
+    "helicopter": "вертолет",
     "bus": "автобус",
     "train": "поезд",
     "truck": "грузовик",
