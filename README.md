@@ -40,13 +40,47 @@
 
 ---
 
-## Установка и запуск
-- **git clone https://github.com/rockettoom666-ops/Burevestnik.git**
-- **cd Burevestnik**
-- **pip install -r requirements.txt**
-- **python burevestnik.py**
+## Установка 
+Нужны Python и Git. Для загрузки моделей нужен Git LFS.
+
+```powershell
+git clone https://github.com/rockettoom666-ops/Burevestnik.git
+cd Burevestnik
+git lfs install
+git lfs pull
+```
+
+Создай виртуальное окружение и поставь библиотеки:
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+Если PowerShell не дает включить окружение, один раз выполни:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+```
 
 ---
+
+### Запуск
+Основная точка запуска:
+
+```powershell
+python .\код\прототип.py
+```
+
+После запуска:
+
+1. Нажми `Работать с камерой`, чтобы выбрать веб-камеру.
+2. Или нажми `Тест на видео`, чтобы открыть видеофайл.
+3. Включи отслеживание в интерфейсе.
+4. При появлении нового объекта программа покажет предупреждение и проиграет звук тревоги.
 
 ### Интерфейс и управление
 - **«Работать с камерой»** – поиск и подключение веб-камеры (индексы 0–9).
