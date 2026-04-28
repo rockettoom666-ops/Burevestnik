@@ -182,6 +182,8 @@ class AirSpaceMonitor(ctk.CTk):
         self.frame_job = None
         self.current_photo = None
         self.current_pil_image = None
+        self.current_display_size = None
+        self.current_display_offset = (0, 0)
         self.current_source = "Источник не выбран"
         self.current_mode = "Ожидание"
         self.current_resolution = "-"
@@ -491,14 +493,16 @@ class AirSpaceMonitor(ctk.CTk):
         x1, y1 = self.roi_start
         x2, y2 = event.x, event.y
         if self.capture is not None:
-            if self.current_pil_image is None: return
-            lw = self.video_label.winfo_width()
-            lh = self.video_label.winfo_height()
-            if lw < 10 or lh < 10: return
+            if self.last_raw_frame is None: return
+            fh, fw = self.last_raw_frame.shape[:2]
+            if fw == 0 or fh == 0: return
 
-            imw, imh = self.current_pil_image.size
-            offset_x = (lw - imw) // 2
-            offset_y = (lh - imh) // 2
+            if self.current_display_size is not None:
+                imw, imh = self.current_display_size
+                offset_x, offset_y = self.current_display_offset
+            else:
+                imw, imh, offset_x, offset_y = self._get_display_geometry(fw, fh)
+            if imw < 1 or imh < 1: return
 
             ix1 = x1 - offset_x
             iy1 = y1 - offset_y
@@ -510,10 +514,6 @@ class AirSpaceMonitor(ctk.CTk):
             ix2 = max(0, min(ix2, imw - 1))
             iy2 = max(0, min(iy2, imh - 1))
 
-            fw = int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-            fh = int(self.capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            if fw == 0 or fh == 0: return
-
             sx = fw / imw
             sy = fh / imh
 
@@ -521,6 +521,9 @@ class AirSpaceMonitor(ctk.CTk):
             ry1 = int(iy1 * sy)
             rx2 = int(ix2 * sx)
             ry2 = int(iy2 * sy)
+
+            rx1, rx2 = sorted((rx1, rx2))
+            ry1, ry2 = sorted((ry1, ry2))
 
             self.roi = (rx1, ry1, rx2, ry2)
             if self.last_gray is not None:
@@ -981,14 +984,30 @@ class AirSpaceMonitor(ctk.CTk):
             line = f"{tid:<4} {tr.best_label:<12} {cx:<6} {cy:<6} {int(threat):<8}\n"
             self.table_text.insert("end", line)
 
+    def _get_display_geometry(self, frame_width, frame_height):
+        label_width = self.video_label.winfo_width()
+        label_height = self.video_label.winfo_height()
+        if label_width < 10 or label_height < 10:
+            label_width = frame_width
+            label_height = frame_height
+
+        scale = min(label_width / frame_width, label_height / frame_height)
+        display_width = max(1, int(frame_width * scale))
+        display_height = max(1, int(frame_height * scale))
+        offset_x = (label_width - display_width) // 2
+        offset_y = (label_height - display_height) // 2
+        return display_width, display_height, offset_x, offset_y
+
     def _draw_frame(self, frame):
         #Подгоняем кадр под доступное место, но сохраняем пропорции.
+        frame_height, frame_width = frame.shape[:2]
+        display_width, display_height, offset_x, offset_y = self._get_display_geometry(frame_width, frame_height)
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         image = Image.fromarray(rgb)
-        lw = max(self.video_label.winfo_width(), 640)
-        lh = max(self.video_label.winfo_height(), 420)
-        image.thumbnail((lw, lh), Image.Resampling.LANCZOS)
+        image = image.resize((display_width, display_height), Image.Resampling.LANCZOS)
         self.current_pil_image = image
+        self.current_display_size = (display_width, display_height)
+        self.current_display_offset = (offset_x, offset_y)
         self.current_photo = ImageTk.PhotoImage(image)
         self.video_label.configure(image=self.current_photo, text="")
 
