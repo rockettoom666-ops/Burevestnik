@@ -40,6 +40,7 @@ class Track:
         self.label_history = deque(maxlen=10)
         self.label_history.append(label)
         self.pred_bbox = list(bbox)
+        #Держим простую модель движения, чтобы не терять цель между кадрами.
         self.kf = KalmanFilter(dim_x=4, dim_z=2)
         self.kf.F = np.array([[1,0,1,0],[0,1,0,1],[0,0,1,0],[0,0,0,1]])
         self.kf.H = np.array([[1,0,0,0],[0,1,0,0]])
@@ -106,6 +107,7 @@ class KalmanTracker:
         self.next_id = 1
     def update(self, detections, labels, confidences=None):
         for tr in self.tracks: tr.predict()
+        #Считаем, насколько каждая новая рамка похожа на уже существующий трек.
         cost = np.zeros((len(self.tracks), len(detections)), dtype=np.float32)
         for i, tr in enumerate(self.tracks):
             pred_bbox = tr.pred_bbox
@@ -127,6 +129,7 @@ class KalmanTracker:
                 iou = inter/(area_tr+area_det-inter+1e-6)
                 cost[i,j] = 0.6*dist_norm + 0.4*(1.0-iou)
                 if confidences and confidences[j]>0: cost[i,j] = cost[i,j]/(confidences[j]+0.1)
+        #Подбираем лучшее соответствие "старый трек -> новая детекция".
         row_ind, col_ind = linear_sum_assignment(cost)
         assigned_t, assigned_d = set(), set()
         for r,c in zip(row_ind, col_ind):
@@ -144,6 +147,7 @@ class KalmanTracker:
         return {tr.id: tr for tr in self.tracks}
 
 def compute_threat(track, frame_center, roi=None):
+    #Угроза растет, если цель ближе к центру, быстрее движется или входит в запретную зону.
     cx,cy = track.centroid
     dist = np.hypot(cx-frame_center[0], cy-frame_center[1])
     vx,vy = track.velocity
@@ -215,6 +219,7 @@ class AirSpaceMonitor(ctk.CTk):
         self.show_empty_view()
 
     def _load_initial_model(self):
+        #При старте подхватываем первую найденную модель, чтобы приложение сразу было готово к работе.
         self._scan_model_files()
         if self.model_files:
             self.selected_model_path = self.model_files[0]
@@ -531,6 +536,7 @@ class AirSpaceMonitor(ctk.CTk):
 
     def _find_roi_anchors(self, gray_frame):
         if self.roi is None: return None
+        #Запоминаем заметные точки внутри зоны, чтобы потом сдвигать ее вместе с картинкой.
         rx1,ry1,rx2,ry2 = self.roi
         mask = np.zeros_like(gray_frame)
         cv2.rectangle(mask, (rx1,ry1), (rx2,ry2), 255, -1)
@@ -540,6 +546,7 @@ class AirSpaceMonitor(ctk.CTk):
 
     def _update_roi_position(self, new_gray):
         if self.roi is None or self.roi_anchors is None or self.roi_anchor_frame is None: return
+        #Сдвигаем ROI по оптическому потоку, чтобы зона не "отставала" от фона.
         new_pts, status, _ = cv2.calcOpticalFlowPyrLK(
             self.roi_anchor_frame, new_gray,
             self.roi_anchors.reshape(-1,1,2).astype(np.float32), None)
@@ -573,6 +580,7 @@ class AirSpaceMonitor(ctk.CTk):
 
     def _scan_cameras_worker(self):
         cameras = []
+        #На Windows одни камеры лучше открываются через MSMF, другие через DirectShow.
         backends = [cv2.CAP_MSMF, cv2.CAP_DSHOW] if os.name == "nt" else [cv2.CAP_ANY]
         for index in range(10):
             for backend in backends:
@@ -707,6 +715,7 @@ class AirSpaceMonitor(ctk.CTk):
         instant_fps = 1.0/max(now-self.last_frame_at, 1e-6)
         self.last_frame_at = now
         self.smoothed_fps = instant_fps if self.smoothed_fps==0 else self.smoothed_fps*0.88 + instant_fps*0.12
+        #Для видео можно пропускать часть кадров, иначе детекция будет слишком тяжелой.
         if self.model is not None and self.show_detections and self._should_analyze_current_frame():
             analysis_started = time.perf_counter()
             processed = self._process_frame(frame)
@@ -739,6 +748,7 @@ class AirSpaceMonitor(ctk.CTk):
         if not self.paused and self.roi_anchors is not None:
             self._update_roi_position(self.last_gray)
 
+        #Немного подчеркиваем контраст, чтобы мелкие объекты реже терялись на небе.
         sharpen_kernel = np.array([[0,-1,0],[-1,5,-1],[0,-1,0]])
         sharp = cv2.filter2D(frame, -1, sharpen_kernel)
         lab = cv2.cvtColor(sharp, cv2.COLOR_BGR2LAB)
@@ -763,6 +773,7 @@ class AirSpaceMonitor(ctk.CTk):
             labels.append(label)
             confs.append(conf)
 
+        #Если строгий проход ничего не дал, пробуем мягче, чтобы подхватить дальние и мелкие цели.
         if len(detections)==0:
             results_low = self.model(enhanced, augment=True, conf=CONF_LOW, verbose=False)[0]
             for box in results_low.boxes:
@@ -778,6 +789,7 @@ class AirSpaceMonitor(ctk.CTk):
                 labels.append(label)
                 confs.append(conf)
 
+        #Когда рамки дрона и вертолета сильно пересекаются, слегка смещаем уверенность в пользу вертолета.
         for i in range(len(detections)):
             if labels[i]!="drone": continue
             for j in range(len(detections)):
@@ -846,6 +858,7 @@ class AirSpaceMonitor(ctk.CTk):
         now = time.monotonic()
         self._forget_old_alert_memory(now)
 
+        #Не поднимаем тревогу по одному и тому же объекту на каждом кадре.
         new_alerts = []
         for tid, tr, threat in scored:
             label = tr.best_label
@@ -969,6 +982,7 @@ class AirSpaceMonitor(ctk.CTk):
             self.table_text.insert("end", line)
 
     def _draw_frame(self, frame):
+        #Подгоняем кадр под доступное место, но сохраняем пропорции.
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         image = Image.fromarray(rgb)
         lw = max(self.video_label.winfo_width(), 640)
