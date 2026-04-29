@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, threading, time, glob
+import os, threading, time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -204,7 +204,7 @@ class AirSpaceMonitor(ctk.CTk):
         self.roi_anchor_frame = None
         self.last_raw_frame = None
         self.model_files = []
-        self.selected_model_path = "best.pt"
+        self.selected_model_path = str(PROJECT_ROOT / "модели" / "best.pt")
         self.analysis_frame_step = 1
         self.frame_counter = 0
         self.last_analysis_ms = 0.0
@@ -238,9 +238,12 @@ class AirSpaceMonitor(ctk.CTk):
             messagebox.showerror("Ошибка", f"Не удалось загрузить модель YOLO:\n{e}")
 
     def _scan_model_files(self):
-        self.model_files = glob.glob("*.pt")
+        models_dir = PROJECT_ROOT / "модели"
+        self.model_files = [str(path) for path in sorted(models_dir.glob("*.pt"))]
         if not self.model_files:
-            self.model_files = ["best.pt"]
+            self.model_files = [str(PROJECT_ROOT / "best.pt")]
+        if hasattr(self, "model_selector"):
+            self.model_selector.configure(values=[os.path.basename(path) for path in self.model_files])
 
     def _on_model_select(self, choice):
         for path in self.model_files:
